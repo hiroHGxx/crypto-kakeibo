@@ -4,6 +4,7 @@ import { useState } from "react";
 
 export default function Home() {
   const [address, setAddress] = useState("0x01b27ec780c534ba0fab15509354c3798321273c");
+  const [secondaryAddress, setSecondaryAddress] = useState("0x581087E117A68537b624e0352833dB96654c0481");
   const [year, setYear] = useState("2024");
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -21,7 +22,10 @@ export default function Home() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ address, year: parseInt(year) }),
+        body: JSON.stringify({
+          addresses: [address, secondaryAddress].filter((value) => value.trim().length > 0),
+          year: parseInt(year),
+        }),
       });
 
       if (!response.ok) {
@@ -47,7 +51,10 @@ export default function Home() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ address, year: parseInt(year) }),
+        body: JSON.stringify({
+          addresses: [address, secondaryAddress].filter((value) => value.trim().length > 0),
+          year: parseInt(year),
+        }),
       });
 
       if (!response.ok) {
@@ -81,12 +88,25 @@ export default function Home() {
           <div className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                ウォレットアドレス
+                メインウォレットアドレス
               </label>
               <input
                 type="text"
                 value={address}
                 onChange={(e) => setAddress(e.target.value)}
+                className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                placeholder="0x..."
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                セカンドウォレットアドレス
+              </label>
+              <input
+                type="text"
+                value={secondaryAddress}
+                onChange={(e) => setSecondaryAddress(e.target.value)}
                 className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 placeholder="0x..."
               />

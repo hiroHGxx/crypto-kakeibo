@@ -13,6 +13,19 @@ export class EtherscanAPI {
     this.apiKey = apiKey;
   }
 
+  private uniqueBy<T>(items: T[], keyFn: (item: T) => string): T[] {
+    const seen = new Set<string>();
+    const result: T[] = [];
+    items.forEach((item) => {
+      const key = keyFn(item);
+      if (!seen.has(key)) {
+        seen.add(key);
+        result.push(item);
+      }
+    });
+    return result;
+  }
+
   private async fetchAPI(params: Record<string, string>) {
     const url = new URL(ETHERSCAN_API_BASE);
     url.searchParams.append("chainid", "1"); // Ethereum Mainnet
@@ -31,6 +44,22 @@ export class EtherscanAPI {
     }
 
     return data.result;
+  }
+
+  private async fetchProxy(params: Record<string, string>) {
+    const url = new URL(ETHERSCAN_API_BASE);
+    url.searchParams.append("chainid", "1"); // Ethereum Mainnet
+    url.searchParams.append("apikey", this.apiKey);
+    Object.entries(params).forEach(([key, value]) => {
+      url.searchParams.append(key, value);
+    });
+
+    const response = await fetch(url.toString());
+    const data = await response.json();
+    if (data.error) {
+      throw new Error(data.error.message || "Etherscan proxy API error");
+    }
+    return data.result || null;
   }
 
   // 通常のトランザクション取得
@@ -141,5 +170,88 @@ export class EtherscanAPI {
       nftTransfers,
       erc1155Transfers,
     };
+  }
+
+  // 複数アドレスの全データ取得（自己ウォレット間移動判定用）
+  async getAllTransactionsForAddresses(addresses: string[], year?: number) {
+    const normalized = [...new Set(addresses.map((address) => address.toLowerCase()))];
+    const all = {
+      transactions: [] as EtherscanTransaction[],
+      internalTxs: [] as EtherscanTransaction[],
+      tokenTransfers: [] as EtherscanTokenTransfer[],
+      nftTransfers: [] as EtherscanNFTTransfer[],
+      erc1155Transfers: [] as EtherscanNFTTransfer[],
+    };
+
+    for (const address of normalized) {
+      const data = await this.getAllTransactions(address, year);
+      all.transactions.push(...data.transactions);
+      all.internalTxs.push(...data.internalTxs);
+      all.tokenTransfers.push(...data.tokenTransfers);
+      all.nftTransfers.push(...data.nftTransfers);
+      all.erc1155Transfers.push(...data.erc1155Transfers);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+
+    const transactions = this.uniqueBy(
+      all.transactions,
+      (tx) => `${tx.hash}:${tx.from}:${tx.to}:${tx.value}:${tx.timeStamp}`
+    ).sort((a, b) => parseInt(a.timeStamp) - parseInt(b.timeStamp));
+
+    const internalTxs = this.uniqueBy(
+      all.internalTxs,
+      (tx) => `${tx.hash}:${tx.from}:${tx.to}:${tx.value}:${tx.timeStamp}`
+    ).sort((a, b) => parseInt(a.timeStamp) - parseInt(b.timeStamp));
+
+    const tokenTransfers = this.uniqueBy(
+      all.tokenTransfers,
+      (tx) =>
+        `${tx.hash}:${tx.from}:${tx.to}:${tx.contractAddress}:${tx.value}:${tx.tokenSymbol}:${tx.timeStamp}`
+    ).sort((a, b) => parseInt(a.timeStamp) - parseInt(b.timeStamp));
+
+    const nftTransfers = this.uniqueBy(
+      all.nftTransfers,
+      (tx) =>
+        `${tx.hash}:${tx.from}:${tx.to}:${tx.contractAddress}:${tx.tokenID}:${tx.timeStamp}`
+    ).sort((a, b) => parseInt(a.timeStamp) - parseInt(b.timeStamp));
+
+    const erc1155Transfers = this.uniqueBy(
+      all.erc1155Transfers,
+      (tx) =>
+        `${tx.hash}:${tx.from}:${tx.to}:${tx.contractAddress}:${tx.tokenID}:${tx.tokenValue || ""}:${tx.timeStamp}`
+    ).sort((a, b) => parseInt(a.timeStamp) - parseInt(b.timeStamp));
+
+    return {
+      transactions,
+      internalTxs,
+      tokenTransfers,
+      nftTransfers,
+      erc1155Transfers,
+    };
+  }
+
+  async getTransactionReceipt(txHash: string) {
+    return this.fetchProxy({
+      module: "proxy",
+      action: "eth_getTransactionReceipt",
+      txhash: txHash,
+    });
+  }
+
+  async getTransactionReceipts(txHashes: string[]) {
+    const receipts: Record<string, any> = {};
+    for (const txHash of txHashes) {
+      const normalized = txHash.toLowerCase();
+      try {
+        const receipt = await this.getTransactionReceipt(normalized);
+        if (receipt) {
+          receipts[normalized] = receipt;
+        }
+      } catch (error) {
+        console.warn(`Failed to fetch receipt for ${normalized}`, error);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    }
+    return receipts;
   }
 }

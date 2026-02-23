@@ -3,12 +3,17 @@ import { EtherscanAPI } from "@/lib/etherscan";
 
 export async function POST(request: NextRequest) {
   try {
-    const { address, year } = await request.json();
-    console.log("Request:", { address, year });
+    const { address, secondaryAddress, addresses, year } = await request.json();
+    const targetAddresses = (
+      Array.isArray(addresses) ? addresses : [address, secondaryAddress]
+    )
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      .map((value) => value.trim());
+    console.log("Request:", { targetAddresses, year });
 
-    if (!address) {
+    if (targetAddresses.length === 0) {
       return NextResponse.json(
-        { error: "ウォレットアドレスが必要です" },
+        { error: "ウォレットアドレスが必要です（1件以上）" },
         { status: 400 }
       );
     }
@@ -25,10 +30,10 @@ export async function POST(request: NextRequest) {
 
     console.log("Fetching data from Etherscan...");
     const etherscan = new EtherscanAPI(apiKey);
-    const data = await etherscan.getAllTransactions(address, year);
+    const data = await etherscan.getAllTransactionsForAddresses(targetAddresses, year);
     console.log("Data fetched successfully");
 
-    return NextResponse.json(data);
+    return NextResponse.json({ ...data, targetAddresses });
   } catch (error) {
     console.error("API Error:", error);
     const errorMessage = error instanceof Error ? error.message : "データ取得に失敗しました";
