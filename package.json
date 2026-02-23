@@ -1,0 +1,30 @@
+{
+  "name": "crypto-kakeibo",
+  "version": "1.0.0",
+  "description": "仮想通貨取引履歴管理アプリ",
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "^15.3.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "exceljs": "^4.4.0",
+    "date-fns": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.0.9",
+    "@types/react-dom": "^19.0.5",
+    "typescript": "^5.8.2",
+    "tailwindcss": "^4.1.0",
+    "eslint": "^9.18.0",
+    "eslint-config-next": "^15.3.4"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
