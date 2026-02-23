@@ -4,7 +4,45 @@
 - 本プロジェクトは、Etherscanの取引履歴をGtax共通フォーマット向けExcelへ変換するNext.jsアプリ。
 - Codex運用時の記録先として本ファイルを使用する。
 
-## 最新記録（2026-02-23）
+## 最新記録（2026-02-24）
+
+### WETH取引検出の実装（Claude Code担当）
+
+#### 背景
+- 別AIが解決できなかったWETH取引の分類問題を引き継ぎ
+- MetaMask Bridge経由のETH→WETH取引でWETH Transfer eventが存在しないケースに対応
+- WETH→ETH unwrap取引（method: `0x2e1a7d4d`）の検出失敗に対応
+
+#### 実装内容
+1. **WETH Deposit event検出**
+   - Topic: `0xe1fffcc4923d04b559f4d29a8bfc6cda04eb5b0d3c460751c2402c5c5cc9109c`
+   - ETH→WETH（wrapping）の検出
+   - 返金を考慮した実質的な交換量計算
+
+2. **WETH Withdrawal event検出**
+   - Topic: `0x7fcf532c15f0a6db0bd6d0e038bea71d30d808c7d98cb3bf7268a95bf5081b65`
+   - WETH→ETH（unwrapping）の検出
+   - Internal TXからの検出もサポート
+
+3. **Receipt取得条件の拡張**
+   - WETH contract呼び出し（value=0でも）を対象に追加
+   - Swap候補検出の強化（method ID: `0xd0e30db0`, `0x2e1a7d4d`）
+
+#### 自己ウォレット間送金の処理
+- キタドロマニュアル準拠：送金履歴は記入不要、ガス代のみ記入
+- 取引種別「手数料」として処理
+- 複数ウォレット（メイン・サブ）を自動検出
+
+#### 検証結果
+- ✅ ETH→WETH取引（3件）: 「売買」として正しく分類
+- ✅ WETH→ETH取引（1件）: 「売買」として正しく分類
+- ✅ 自己ウォレット間送金（2件）: 「手数料」として正しく処理
+- ✅ 中間版から最新版で「送金」カテゴリが0件に改善
+- ✅ 37行（中間版33行から+4件検出）
+
+---
+
+## 過去の記録（2026-02-23 - Codex担当）
 
 ### 1. NFT複数購入時の扱い
 - 同一Tx Hash内に複数NFTがある場合、1行に潰さず複数行で出力するよう修正済み。
