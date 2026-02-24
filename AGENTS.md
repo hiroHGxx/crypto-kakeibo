@@ -4,6 +4,22 @@
 - 本プロジェクトは、Etherscanの取引履歴をGtax共通フォーマット向けExcelへ変換するNext.jsアプリ。
 - Codex運用時の記録先として本ファイルを使用する。
 
+## 🚀 次回作業予定：Polygonチェーン対応
+
+- **ブランチ**: `feature/polygon-support`（作成済み・mainから分岐）
+- **目的**: PolygonScan APIを使い、Polygon取引の確定申告用Excel生成を追加
+- **方針**: ETH版のコアロジック（取引分類、ルール評価、Excel生成）を共通化し、チェーン設定で切り替える設計
+- **主な作業**:
+  1. チェーン共通設定インターフェースの定義
+  2. `lib/etherscan.ts` の汎用化（PolygonScan対応）
+  3. `lib/transaction-converter.ts` のETH固有ハードコード除去
+  4. UIにチェーン選択ドロップダウン追加
+  5. Polygon固有ルールの追加（必要に応じて）
+  6. `参考/確定申告2025POL.xlsx`（手作業版）との比較検証
+- **環境変数**: `NEXT_PUBLIC_POLYGONSCAN_API_KEY` を `.env.local` に追加予定
+
+---
+
 ## 最新記録（2026-02-24）
 
 ### NFT Burn取引検出ルールモジュールの実装（Claude Code担当）

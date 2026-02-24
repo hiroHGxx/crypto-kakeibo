@@ -17,6 +17,50 @@
 4. スパムトークンの自動フィルタリング
 5. 確定申告用Excel形式での出力
 
+## 🚀 次回作業予定：Polygonチェーン対応
+
+### 方針
+- **ブランチ `feature/polygon-support`** を作成済み（mainから分岐）
+- mainブランチのETH版に影響を与えずに開発する
+- PolygonScanはEtherscan互換APIのため、コアロジックの大部分は共通化可能
+
+### ブランチ切り替え
+```bash
+git checkout feature/polygon-support
+```
+
+### 作業ステップ（予定）
+1. **チェーン共通の設定インターフェースを定義**
+   - API URL、ネイティブトークン名（ETH/POL）、Wrappedトークン名（WETH/WPOL）等
+   - コントラクトアドレスをチェーンごとに設定
+2. **`lib/etherscan.ts` → 汎用APIクライアントにリファクタ**
+   - PolygonScan API対応（エンドポイントの差し替え）
+   - APIキーをチェーンごとに管理
+3. **`lib/transaction-converter.ts` のETH固有部分をチェーン設定に差し替え**
+   - WETH_CONTRACT_ADDRESS等のハードコード → チェーン設定から取得
+4. **UIにチェーン選択を追加**（`app/page.tsx`）
+   - ドロップダウンでEthereum/Polygon選択
+5. **Polygon固有のルールがあれば `lib/classification-rules.ts` に追加**
+6. **テスト・検証**
+   - 参考: `参考/確定申告2025POL.xlsx`（手作業版あり）
+7. **mainにマージ**
+
+### ETHとPolygonの主な差異
+
+| 項目 | Ethereum | Polygon |
+|------|----------|---------|
+| APIエンドポイント | api.etherscan.io | api.polygonscan.com |
+| ネイティブトークン | ETH | POL |
+| Wrappedトークン | WETH | WPOL/WMATIC |
+| コントラクトアドレス | 異なる | 異なる |
+| APIキー環境変数 | `NEXT_PUBLIC_ETHERSCAN_API_KEY` | `NEXT_PUBLIC_POLYGONSCAN_API_KEY`（新規追加） |
+
+### 参考ファイル
+- `参考/確定申告2025POL.xlsx` — 手作業版（Polygon、検証用）
+- `参考/確定申告2025BNB.xlsx` — 手作業版（BSC、将来対応用）
+
+---
+
 ## 最新作業記録（2026-02-24）
 
 ### 解決した技術課題3: NFT Burn取引の自動検出（ルールモジュールシステム）
