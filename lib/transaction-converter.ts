@@ -4,6 +4,10 @@ import {
   EtherscanNFTTransfer,
   AccountingEntry,
 } from "@/types";
+import {
+  evaluateClassificationRules,
+  type RuleContext,
+} from "./classification-rules";
 
 // Unix timestamp を JST の日時文字列に変換
 function formatJSTDate(timestamp: string): string {
@@ -434,10 +438,12 @@ function groupNFTTrades(
   const ownAddressSet = toOwnAddressSet(userAddresses);
 
   // スパム除外後の全NFT転送（ERC721 + ERC1155）をハッシュでマッピング
+  const NULL_ADDRESS = "0x0000000000000000000000000000000000000000";
   const nftByHash = new Map<string, EtherscanNFTTransfer[]>();
   [...nftTransfers, ...erc1155Transfers]
     .filter((nft) => !isSpamNFT(nft, userAddresses))
     .filter((nft) => !(isOwnAddress(nft.from, ownAddressSet) && isOwnAddress(nft.to, ownAddressSet)))
+    .filter((nft) => (nft.to || "").toLowerCase() !== NULL_ADDRESS) // Nullアドレスへの焼却を除外
     .forEach((nft) => {
       const list = nftByHash.get(nft.hash) || [];
       list.push(nft);
@@ -1137,8 +1143,101 @@ export function convertAllTransactions(
 
   // 通常トランザクション
   transactions.forEach((tx) => {
+    const txHash = tx.hash;
+
+    // デバッグ用: 特定のBurnトランザクションをログ出力
+    const isBurnHash =
+      txHash.toLowerCase() === "0xc41e335893334906fbc4e6d94454cceb0f18f72955b30a219ecacee6210f8e18" ||
+      txHash.toLowerCase() === "0x7be15b654ca8ec92bf55650f985626d0f87b31e8d044fab452c1a25a1529a4d2";
+
+    if (isBurnHash) {
+      console.log(`\n🔥 Burn候補検出: ${txHash}`);
+      console.log(`  isInYear: ${isInYear(tx.timeStamp)}`);
+      console.log(`  isProcessed: ${isProcessed(txHash)}`);
+    }
+
     if (isInYear(tx.timeStamp) && !isProcessed(tx.hash)) {
-      const txHash = tx.hash;
+      // ルールモジュールによる分類評価
+      const hashNftTransfers = nftTransfers.filter((nft) => nft.hash === txHash);
+      const hashErc1155Transfers = erc1155.filter((nft) => nft.hash === txHash);
+      const allHashNftTransfers = [...hashNftTransfers, ...hashErc1155Transfers];
+      const hashTokenTransfers = tokenTransfers.filter((token) => token.hash === txHash);
+      const hashInternalTxs = internalByHash.get(txHash) || [];
+
+      if (isBurnHash) {
+        console.log(`  NFT transfers found: ${allHashNftTransfers.length}`);
+        allHashNftTransfers.forEach((nft, i) => {
+          console.log(`    [${i}] ${nft.tokenName}#${nft.tokenID}`);
+          console.log(`        from: ${nft.from}`);
+          console.log(`        to: ${nft.to}`);
+        });
+      }
+
+      const ruleContext: RuleContext = {
+        tx,
+        nftTransfers: allHashNftTransfers,
+        tokenTransfers: hashTokenTransfers,
+        internalTxs: hashInternalTxs,
+        ownAddresses: ownAddressSet,
+        txHash,
+      };
+
+      const ruleResult = evaluateClassificationRules(ruleContext);
+
+      if (isBurnHash) {
+        console.log(`  ルール評価結果: ${ruleResult.type || 'null'}`);
+        if (ruleResult.reason) {
+          console.log(`  理由: ${ruleResult.reason}`);
+        }
+      }
+
+      if (ruleResult.type) {
+        // ルールにマッチした場合
+        const fee = (parseFloat(tx.gasUsed) * parseFloat(tx.gasPrice)) / 1e18;
+
+        if (ruleResult.type === "減少" && allHashNftTransfers.length > 0) {
+          // NFT焼却の場合: NFT資産を減少させる
+          allHashNftTransfers.forEach((nft) => {
+            const nftName = `${nft.tokenName || "NFT"}#${nft.tokenID}`;
+            entries.push({
+              取引所名: "metamask",
+              "日時（JST）": formatJSTDate(tx.timeStamp),
+              取引種別: "減少",
+              "取引通貨名(+)": "",
+              "取引量(+)": "",
+              "取引通貨名(-)": `NFT資産${nftName}`,
+              "取引量(-)": parseFloat(nft.tokenValue || "1"),
+              取引額時価: "",
+              手数料通貨名: "ETH",
+              手数料数量: fee / allHashNftTransfers.length, // ガス代を均等分割
+              取引詳細: ruleResult.reason || "",
+            });
+          });
+        } else {
+          // その他のルール（手数料等）
+          entries.push({
+            取引所名: "metamask",
+            "日時（JST）": formatJSTDate(tx.timeStamp),
+            取引種別: ruleResult.type,
+            "取引通貨名(+)": "",
+            "取引量(+)": "",
+            "取引通貨名(-)": "",
+            "取引量(-)": "",
+            取引額時価: "",
+            手数料通貨名: "ETH",
+            手数料数量: fee,
+            取引詳細: ruleResult.reason || "",
+          });
+        }
+
+        markProcessed(txHash);
+
+        if (ruleResult.skipDefault) {
+          return; // 既存ロジックをスキップ
+        }
+      }
+
+      // 既存ロジック継続
       const isOutgoing = isOwnAddress(tx.from, ownAddressSet);
       const txValue = weiToEth(tx.value);
       const hasNftOnHash = nftTransferHashSet.has(txHash);

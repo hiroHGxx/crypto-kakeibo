@@ -19,7 +19,335 @@
 
 ## 最新作業記録（2026-02-24）
 
-### 解決した技術課題：WETH取引の検出と自己ウォレット間送金の処理
+### 解決した技術課題3: NFT Burn取引の自動検出（ルールモジュールシステム）
+
+#### 背景
+- ユーザーからNFT焼却（Burn）取引の自動検出要望
+- 2つのBurn取引が「減少」として分類されるべき
+  - Hash 1: `0xc41e335893334906fbc4e6d94454cceb0f18f72955b30a219ecacee6210f8e18`
+  - Hash 2: `0x7be15b654ca8ec92bf55650f985626d0f87b31e8d044fab452c1a25a1529a4d2`
+- NFTをNullアドレス（`0x0000000000000000000000000000000000000000`）に送付
+- 今後も同様のルールを追加していく必要性
+
+#### 実装方針：ルールモジュールシステムの構築
+
+**選択した方式**: ロジック条件分岐ではなく、拡張可能なルールモジュール方式
+
+**理由**:
+- 将来的なルール追加が容易
+- 各ルールの独立性確保
+- 優先度による柔軟な評価順序制御
+- デバッグ・メンテナンス性の向上
+
+#### 実装内容
+
+**1. ルールモジュールの作成** (`lib/classification-rules.ts`):
+
+```typescript
+const NULL_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+export interface RuleContext {
+  tx: EtherscanTransaction;
+  nftTransfers: EtherscanNFTTransfer[];
+  tokenTransfers: EtherscanTokenTransfer[];
+  internalTxs: EtherscanTransaction[];
+  ownAddresses: Set<string>;
+  txHash: string;
+}
+
+export interface ClassificationResult {
+  type: "減少" | "送付" | "受取" | "売買" | "手数料" | "ボーナス" | null;
+  reason?: string;
+  skipDefault?: boolean;
+}
+
+interface ClassificationRule {
+  id: string;
+  description: string;
+  priority: number;
+  check: (context: RuleContext) => boolean;
+  action: (context: RuleContext) => ClassificationResult;
+}
+
+export const classificationRules: ClassificationRule[] = [
+  // ルール1: NFT焼却（Nullアドレスへの送付）
+  {
+    id: "nft-burn-to-null",
+    description: "NFTをNullアドレスに送付（焼却）→ 減少",
+    priority: 10,
+    check: (ctx) => {
+      if (ctx.nftTransfers.length === 0) return false;
+      return ctx.nftTransfers.some((transfer) => {
+        const from = (transfer.from || "").toLowerCase();
+        const to = (transfer.to || "").toLowerCase();
+        return (
+          ctx.ownAddresses.has(from) &&
+          to === NULL_ADDRESS
+        );
+      });
+    },
+    action: (ctx) => {
+      const burnedNfts = ctx.nftTransfers.filter((transfer) => {
+        const from = (transfer.from || "").toLowerCase();
+        const to = (transfer.to || "").toLowerCase();
+        return ctx.ownAddresses.has(from) && to === NULL_ADDRESS;
+      });
+
+      const nftNames = burnedNfts
+        .map((nft) => `${nft.tokenName || "NFT"}#${nft.tokenID}`)
+        .join(", ");
+
+      return {
+        type: "減少",
+        reason: `NFT焼却（${nftNames} → Nullアドレス）`,
+        skipDefault: true,
+      };
+    },
+  },
+
+  // ルール2: 自己ウォレット間のETH送金
+  {
+    id: "self-wallet-eth-transfer",
+    description: "自己ウォレット間のETH送金 → 手数料（ガス代のみ）",
+    priority: 20,
+    // ... 実装済み
+  },
+
+  // ルール3: 自己ウォレット間のNFT送金
+  {
+    id: "self-wallet-nft-transfer",
+    description: "自己ウォレット間のNFT送金 → 手数料（ガス代のみ）",
+    priority: 21,
+    // ... 実装済み
+  },
+];
+
+export function evaluateClassificationRules(
+  context: RuleContext
+): ClassificationResult {
+  const sortedRules = [...classificationRules].sort(
+    (a, b) => a.priority - b.priority
+  );
+
+  for (const rule of sortedRules) {
+    try {
+      if (rule.check(context)) {
+        const result = rule.action(context);
+        console.log(
+          `✅ ルール適用 [${rule.id}]: ${rule.description}`,
+          `→ ${result.type}`,
+          result.reason ? `(${result.reason})` : ""
+        );
+        return result;
+      }
+    } catch (error) {
+      console.error(`❌ ルール評価エラー [${rule.id}]:`, error);
+    }
+  }
+
+  return { type: null };
+}
+```
+
+**2. トランザクション変換への統合** (`lib/transaction-converter.ts`):
+
+```typescript
+import {
+  evaluateClassificationRules,
+  type RuleContext,
+} from "./classification-rules";
+
+// 通常トランザクション処理の冒頭でルール評価
+transactions.forEach((tx) => {
+  if (isInYear(tx.timeStamp) && !isProcessed(tx.hash)) {
+    const txHash = tx.hash;
+
+    // ルールモジュールによる分類評価
+    const hashNftTransfers = nftTransfers.filter((nft) => nft.hash === txHash);
+    const hashErc1155Transfers = erc1155.filter((nft) => nft.hash === txHash);
+    const allHashNftTransfers = [...hashNftTransfers, ...hashErc1155Transfers];
+    const hashTokenTransfers = tokenTransfers.filter((token) => token.hash === txHash);
+    const hashInternalTxs = internalByHash.get(txHash) || [];
+
+    const ruleContext: RuleContext = {
+      tx,
+      nftTransfers: allHashNftTransfers,
+      tokenTransfers: hashTokenTransfers,
+      internalTxs: hashInternalTxs,
+      ownAddresses: ownAddressSet,
+      txHash,
+    };
+
+    const ruleResult = evaluateClassificationRules(ruleContext);
+
+    if (ruleResult.type) {
+      const fee = (parseFloat(tx.gasUsed) * parseFloat(tx.gasPrice)) / 1e18;
+
+      if (ruleResult.type === "減少" && allHashNftTransfers.length > 0) {
+        // NFT焼却の場合: NFT資産を減少させる
+        allHashNftTransfers.forEach((nft) => {
+          const nftName = `${nft.tokenName || "NFT"}#${nft.tokenID}`;
+          entries.push({
+            取引所名: "metamask",
+            "日時（JST）": formatJSTDate(tx.timeStamp),
+            取引種別: "減少",
+            "取引通貨名(+)": "",
+            "取引量(+)": 0,
+            "取引通貨名(-)": `NFT資産${nftName}`,
+            "取引量(-)": parseFloat(nft.tokenValue || "1"),
+            取引額時価: "",
+            手数料通貨名: "ETH",
+            手数料数量: fee / allHashNftTransfers.length,
+            取引詳細: ruleResult.reason || "",
+          });
+        });
+      } else {
+        // その他のルール（手数料等）
+        entries.push({
+          // ... 手数料エントリ生成
+        });
+      }
+
+      markProcessed(txHash);
+
+      if (ruleResult.skipDefault) {
+        return;
+      }
+    }
+
+    // 既存ロジック継続...
+  }
+});
+```
+
+**3. NFT売買グループ化からBurnを除外** (`lib/transaction-converter.ts`):
+
+```typescript
+function groupNFTTrades(/* ... */) {
+  const nftByHash = new Map<string, EtherscanNFTTransfer[]>();
+  [...nftTransfers, ...erc1155Transfers]
+    .filter((nft) => !isSpamNFT(nft, userAddresses))
+    .filter((nft) => !(isOwnAddress(nft.from, ownAddressSet) && isOwnAddress(nft.to, ownAddressSet)))
+    .filter((nft) => (nft.to || "").toLowerCase() !== NULL_ADDRESS) // Burn除外
+    .forEach((nft) => {
+      const list = nftByHash.get(nft.hash) || [];
+      list.push(nft);
+      nftByHash.set(nft.hash, list);
+    });
+  // ...
+}
+```
+
+**4. Excel出力への取引詳細列追加** (`lib/excel-generator.ts`):
+
+```typescript
+const headers = [
+  "取引所名",
+  "日時（JST）",
+  "取引種別",
+  "取引通貨名(+)",
+  "取引量(+)",
+  "取引通貨名(-)",
+  "取引量(-)",
+  "取引額時価",
+  "手数料通貨名",
+  "手数料数量",
+  "取引詳細",  // 新規追加
+  "要確認",
+  "推奨取引種別",
+  "確認理由",
+];
+```
+
+#### デバッグと問題解決
+
+**問題**: Burn取引が検出されない
+
+**調査結果**:
+- ログ出力: `isInYear: false` → 2025年で検索していたが、実際は2026年の取引
+- Burn取引の実際の日時（JST）:
+  - Hash 1: 2026-02-23 09:06:59
+  - Hash 2: 2026-02-23 09:17:35
+
+**解決**:
+- 2026年で再検索 → ✅ 正しく検出
+
+#### 検証結果
+
+**Excel出力**（`test_burn_2026.xlsx`）:
+
+```
+行6:
+  日時(JST): 2026-02-23 09:06:59
+  取引種別: 減少
+  取引通貨名(-): NFT資産Talisman Paper of Ema Taruto#1
+  取引量(-): 1
+  手数料通貨名: ETH
+  手数料数量: 0.000223064363175588
+  取引詳細: NFT焼却（Talisman Paper of Ema Taruto#1 → Nullアドレス）
+
+行9:
+  日時(JST): 2026-02-23 09:17:35
+  取引種別: 減少
+  取引通貨名(-): NFT資産Talisman Paper of Ema Taruto#1
+  取引量(-): 1
+  手数料通貨名: ETH
+  手数料数量: 0.000211032414675384
+  取引詳細: NFT焼却（Talisman Paper of Ema Taruto#1 → Nullアドレス）
+```
+
+**ログ出力**:
+```
+🔥 Burn候補検出: 0xc41e335893334906fbc4e6d94454cceb0f18f72955b30a219ecacee6210f8e18
+  isInYear: true
+  isProcessed: false
+  NFT transfers found: 1
+    [0] Talisman Paper of Ema Taruto#1
+        from: 0x01b27ec780c534ba0fab15509354c3798321273c
+        to: 0x0000000000000000000000000000000000000000
+✅ ルール適用 [nft-burn-to-null]: NFTをNullアドレスに送付（焼却）→ 減少 → 減少 (NFT焼却（Talisman Paper of Ema Taruto#1 → Nullアドレス）)
+```
+
+#### 結論
+
+✅ **NFT Burn取引の自動検出が完璧に動作**
+- Nullアドレスへの送付を検出
+- 取引種別「減少」として正しく分類
+- NFT資産名と理由を記録
+- 手数料（ガス代）も正しく計算
+
+✅ **ルールモジュールシステムの確立**
+- 優先度ベースの柔軟な評価順序
+- 新規ルールの追加が容易
+- 各ルールの独立性確保
+- デバッグログによる検証可能性
+
+✅ **今後の拡張性確保**
+- Staking入金/出金ルール
+- DEX Swap検出ルール
+- Airdrop受取ルール
+- 等、追加が容易な設計
+
+---
+
+### その他の変更（2026-02-24）
+
+#### UIデフォルト年の変更
+
+**変更内容** (`app/page.tsx`):
+```typescript
+// Before
+const [year, setYear] = useState("2024");
+
+// After
+const [year, setYear] = useState("2026");
+```
+
+**理由**: テスト・実運用での利便性向上
+
+---
+
+### 解決した技術課題2: WETH取引の検出と自己ウォレット間送金の処理
 
 #### 背景
 - 別AIが解決できなかった取引分類問題を引き継ぎ
@@ -412,4 +740,14 @@ NEXT_PUBLIC_ETHERSCAN_API_KEY=your-api-key-here
 ---
 
 **最終更新**: 2026-02-24
-**ステータス**: WETH取引検出・自己間送金処理完了・動作確認済み
+**ステータス**: NFT Burn検出ルールモジュール実装完了・WETH取引検出・自己間送金処理完了・動作確認済み
+
+## 主要ファイル構成
+
+### 新規作成ファイル
+- `lib/classification-rules.ts`: 取引分類ルールモジュール（拡張可能設計）
+
+### 主要変更ファイル
+- `lib/transaction-converter.ts`: ルール評価統合、NFT Burn検出、デバッグログ追加
+- `lib/excel-generator.ts`: 取引詳細列追加
+- `app/page.tsx`: デフォルト年を2026に変更

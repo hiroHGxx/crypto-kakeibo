@@ -6,7 +6,108 @@
 
 ## 最新記録（2026-02-24）
 
-### WETH取引検出の実装（Claude Code担当）
+### NFT Burn取引検出ルールモジュールの実装（Claude Code担当）
+
+#### 背景
+- WETH取引検出完了後、ユーザーからNFT焼却（Burn）取引の自動検出要望
+- 2つのBurn取引（Nullアドレスへの送付）を「減少」として自動分類したい
+- 今後も同様のルールを追加していく拡張性が必要
+
+#### 技術的課題と解決策
+
+**課題1**: 取引分類ロジックが複雑化・保守困難化のリスク
+- **解決**: ルールモジュールシステムの構築
+  - 優先度ベースの評価順序
+  - 各ルールの独立性確保
+  - 新規ルール追加の容易性
+
+**課題2**: NFT Burn取引の検出方法
+- **解決**: Nullアドレス（`0x0000...0000`）への送付検出
+  - ERC721/ERC1155両対応
+  - NFT売買グループ化からBurnを除外
+  - 取引詳細に理由を記録
+
+**課題3**: デバッグと検証の効率化
+- **解決**: 詳細ログ出力システム
+  - 特定ハッシュの追跡
+  - ルール評価結果の可視化
+  - 年度フィルタリングの確認
+
+#### 実装成果
+
+**1. ルールモジュールシステム** (`lib/classification-rules.ts`)
+```typescript
+export interface ClassificationRule {
+  id: string;
+  description: string;
+  priority: number;
+  check: (context: RuleContext) => boolean;
+  action: (context: RuleContext) => ClassificationResult;
+}
+
+export const classificationRules: ClassificationRule[] = [
+  {
+    id: "nft-burn-to-null",
+    description: "NFTをNullアドレスに送付（焼却）→ 減少",
+    priority: 10,
+    check: (ctx) => /* Nullアドレス検出 */,
+    action: (ctx) => ({
+      type: "減少",
+      reason: `NFT焼却（${nftNames} → Nullアドレス）`,
+      skipDefault: true,
+    }),
+  },
+  // 自己ウォレット間ETH/NFT送金ルールも統合
+];
+```
+
+**2. 実装されたルール**
+- ✅ NFT焼却（Nullアドレス送付） → 減少
+- ✅ 自己ウォレット間ETH送金 → 手数料
+- ✅ 自己ウォレット間NFT送金 → 手数料
+
+**3. Excel出力強化**
+- 取引詳細列を追加
+- Burn理由の自動記録
+- NFT資産名の明確化
+
+#### 検証結果
+
+**テスト取引**（2026年）:
+- Hash 1: `0xc41e...` → ✅ 減少として検出
+- Hash 2: `0x7be1...` → ✅ 減少として検出
+
+**Excel出力**:
+```
+取引種別: 減少
+取引通貨名(-): NFT資産Talisman Paper of Ema Taruto#1
+取引量(-): 1
+手数料通貨名: ETH
+手数料数量: 0.000223...
+取引詳細: NFT焼却（Talisman Paper of Ema Taruto#1 → Nullアドレス）
+```
+
+#### 技術的優位性
+
+**拡張性**:
+- 新規ルール追加が容易（1ファイル編集のみ）
+- 優先度による柔軟な制御
+- 既存ルールとの競合回避
+
+**保守性**:
+- ルール単位での独立テスト可能
+- デバッグログによる問題切り分け
+- コードの可読性向上
+
+**将来の拡張例**:
+- Staking入金/出金検出
+- DEX Swap自動分類
+- Airdrop受取検出
+- Bridge取引検出
+
+---
+
+### WETH取引検出の実装（Claude Code担当）（完了）
 
 #### 背景
 - 別AIが解決できなかったWETH取引の分類問題を引き継ぎ

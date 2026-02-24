@@ -5,7 +5,7 @@ import { useState } from "react";
 export default function Home() {
   const [address, setAddress] = useState("0x01b27ec780c534ba0fab15509354c3798321273c");
   const [secondaryAddress, setSecondaryAddress] = useState("0x581087E117A68537b624e0352833dB96654c0481");
-  const [year, setYear] = useState("2024");
+  const [year, setYear] = useState("2026");
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [result, setResult] = useState<any>(null);
@@ -121,7 +121,7 @@ export default function Home() {
                 value={year}
                 onChange={(e) => setYear(e.target.value)}
                 className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="2024"
+                placeholder="2026"
               />
             </div>
 
