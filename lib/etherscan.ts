@@ -3,16 +3,28 @@ import {
   EtherscanTokenTransfer,
   EtherscanNFTTransfer,
 } from "@/types";
+import { ChainConfig, CHAIN_CONFIGS } from "./chain-config";
 
-const ETHERSCAN_API_BASE = "https://api.etherscan.io/v2/api";
+const DEFAULT_API_BASE = "https://api.etherscan.io/v2/api";
 
 export class EtherscanAPI {
   private apiKey: string;
   private chainId: string;
+  private apiBaseUrl: string;
+  private useChainIdParam: boolean;
 
-  constructor(apiKey: string, chainId: string = "1") {
+  constructor(apiKey: string, chainIdOrConfig: string | ChainConfig = "1") {
     this.apiKey = apiKey;
-    this.chainId = chainId;
+    if (typeof chainIdOrConfig === "string") {
+      const config = CHAIN_CONFIGS[chainIdOrConfig];
+      this.chainId = chainIdOrConfig;
+      this.apiBaseUrl = config?.apiBaseUrl ?? DEFAULT_API_BASE;
+      this.useChainIdParam = config?.useChainIdParam ?? true;
+    } else {
+      this.chainId = chainIdOrConfig.chainId;
+      this.apiBaseUrl = chainIdOrConfig.apiBaseUrl;
+      this.useChainIdParam = chainIdOrConfig.useChainIdParam;
+    }
   }
 
   private uniqueBy<T>(items: T[], keyFn: (item: T) => string): T[] {
@@ -29,8 +41,10 @@ export class EtherscanAPI {
   }
 
   private async fetchAPI(params: Record<string, string>, maxRetries = 3) {
-    const url = new URL(ETHERSCAN_API_BASE);
-    url.searchParams.append("chainid", this.chainId);
+    const url = new URL(this.apiBaseUrl);
+    if (this.useChainIdParam) {
+      url.searchParams.append("chainid", this.chainId);
+    }
     url.searchParams.append("apikey", this.apiKey);
     Object.entries(params).forEach(([key, value]) => {
       url.searchParams.append(key, value);
@@ -66,15 +80,22 @@ export class EtherscanAPI {
         continue;
       }
 
-      throw new Error(data.message || data.result || "Etherscan API error");
+      // 詳細なエラーメッセージを構築（result に詳細が入っているケース多数）
+      const detail = data.result && typeof data.result === "string" ? data.result : "";
+      const errorMessage = detail
+        ? `${data.message || "API error"}: ${detail}`
+        : data.message || "Etherscan API error";
+      throw new Error(errorMessage);
     }
 
     throw new Error("Etherscan API: max retries exceeded");
   }
 
   private async fetchProxy(params: Record<string, string>) {
-    const url = new URL(ETHERSCAN_API_BASE);
-    url.searchParams.append("chainid", this.chainId);
+    const url = new URL(this.apiBaseUrl);
+    if (this.useChainIdParam) {
+      url.searchParams.append("chainid", this.chainId);
+    }
     url.searchParams.append("apikey", this.apiKey);
     Object.entries(params).forEach(([key, value]) => {
       url.searchParams.append(key, value);

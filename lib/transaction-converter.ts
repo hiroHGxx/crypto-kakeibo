@@ -316,6 +316,7 @@ function isSpamToken(
     'WETH', 'USDT', 'USDC', 'DAI', 'WBTC', 'LINK', 'UNI', 'AAVE',
     'MATIC', 'SHIB', 'APE', 'LDO', 'CRV', 'MKR', 'SNX', 'COMP',
     'WMATIC', 'POL', 'WPOL', 'SAND', 'FNCT', 'CNGT', 'JPYC',
+    'BNB', 'WBNB', 'CAKE', 'MCAKE', 'BUSD', 'ETH',
   ];
 
   if (trustedTokens.includes(symbol)) {
@@ -534,7 +535,7 @@ function groupNFTTrades(
   // 支払いに使われるトークン転送（ネイティブトークン/Wrappedトークン）をハッシュでマッピング
   const paymentTokenSymbols = new Set([
     config.nativeToken, config.wrappedNativeToken,
-    "ETH", "WETH", "MATIC", "WMATIC", "POL",
+    "ETH", "WETH", "MATIC", "WMATIC", "POL", "BNB", "WBNB",
   ]);
   const paymentTokensByHash = new Map<string, EtherscanTokenTransfer[]>();
   tokenTransfers.forEach((token) => {
@@ -894,7 +895,7 @@ function groupSelfTokenMovementPairs(
   const windowMs = (options.windowMinutes ?? 30) * 60 * 1000;
   const excludeSymbols =
     options.excludeSymbols ??
-    new Set<string>(["ETH", "POL", "MATIC", "WETH", "WMATIC"]);
+    new Set<string>(["ETH", "POL", "MATIC", "WETH", "WMATIC", "BNB", "WBNB"]);
 
   const parseTime = (s: string): number => new Date(s).getTime();
   const used = new Set<number>();
@@ -1201,6 +1202,14 @@ export function convertAllTransactions(
     "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": { symbol: "WETH", decimals: 18 },
     "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": { symbol: "USDC", decimals: 6 },
     "0xdac17f958d2ee523a2206206994597c13d831ec7": { symbol: "USDT", decimals: 6 },
+    // BSC well-known tokens
+    "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c": { symbol: "WBNB", decimals: 18 },
+    "0x55d398326f99059ff775485246999027b3197955": { symbol: "USDT", decimals: 18 }, // BSC-USDT (18 dec)
+    "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d": { symbol: "USDC", decimals: 18 }, // BSC-USDC (18 dec)
+    "0xe9e7cea3dedca5984780bafc599bd69add087d56": { symbol: "BUSD", decimals: 18 },
+    "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82": { symbol: "Cake", decimals: 18 }, // PancakeSwap Token
+    "0x581fa684d0ec11ccb46b1d92f1f24c8a3f95c0ca": { symbol: "mCake", decimals: 18 }, // Magpie mCake (BSC)
+    "0x2170ed0880ac9a755fd29b2688956bd959f933f8": { symbol: "ETH", decimals: 18 }, // BSC-ETH (Binance-Peg)
   };
   Object.entries(WELL_KNOWN_TOKENS).forEach(([addr, info]) => {
     if (!tokenInfoByAddress.has(addr)) {
