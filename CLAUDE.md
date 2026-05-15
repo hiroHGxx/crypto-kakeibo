@@ -21,10 +21,140 @@
 
 ### 現在のブランチ
 - `main` — Polygon対応・分類改善すべて統合済み（2026-05-15 origin/main に push 済み）
+- `feature/bsc-support` — **作業中（未コミット）** BSC対応＋Excelインポート統合機能 (2026-05-16)
 - `feature/polygon-support` — マージ済み（残置）
 - `feature/classification-refinements` — マージ済み（残置）
 
-## 最新作業記録（2026-05-15）FNCT手数料グループ化・10YETH無料mintボーナス化・main統合
+## 最新作業記録（2026-05-16）BSC対応 → Excelインポート方式に方針転換【中断中】
+
+### 作業概要
+BSC対応に着手。Etherscan v2無料プランがBSC非対応と判明し、方針を「Excel手動入力データのインポート統合」に変更。コードは完成・ビルドOKだが動作確認前に中断。
+
+### 経緯と判明事項
+
+#### 1. BSC自動取得の試行 → 失敗
+- `feature/bsc-support` ブランチ作成
+- `lib/chain-config.ts` に BSC (chainId=56, BNB/WBNB) を追加
+- `SUPPORTED_CHAIN_IDS` に "56" を追加
+- 関連トークンリスト（trustedTokens, paymentTokenSymbols, excludeSymbols, WELL_KNOWN_TOKENS）にBNB/WBNB/Cake/mCake/BSC-USDT/BSC-USDC/BSC-ETH等を追加
+- **API実行で `NOTOK: Free API access is not supported for this chain` エラー**
+
+#### 2. 原因調査・確定
+- `curl https://api.etherscan.io/v2/chainlist` で各チェーンの状況確認
+- **Etherscan v2無料プランで使えるチェーン**:
+  - ✅ chainid=1 (Ethereum)
+  - ✅ chainid=137 (Polygon)
+  - ✅ chainid=42161 (Arbitrum)
+  - ❌ chainid=56 (BSC) → 有料Proプラン($199/月)が必要
+  - ❌ chainid=8453 (Base), 10 (Optimism), 43114 (Avalanche) → 同上
+- BscScan の「同じAPIキーでBSCも使える」案内は事実だが、"full chain coverage" にはProプラン必要
+
+#### 3. 方針転換: Excel手動入力データのインポート統合
+- ユーザー判断: 「ではExcelファイルを別で準備する形にします」
+- 手作業BNB Excel(`参考/確定申告2025BNB.xlsx` 50行)をUIアップロード → ETH+POL自動生成と統合
+- 年1回の確定申告用途として現実的・無料・確実
+
+### 完了した実装（未コミット）
+
+#### 新規ファイル
+- `lib/excel-importer.ts` — 既存形式 Excel を AccountingEntry[] に変換
+  - 列1-10構造（取引所名/日時/取引種別/通貨+/-/手数料）対応
+  - 日時セル(Date object, UTC基準) → JST文字列に変換
+  - 年フィルタ対応
+  - **動作確認済み**: 参考BNB 50行を正しく読み込み（手数料18/減少10/売買16/ボーナス6）
+
+#### 変更ファイル
+- `lib/chain-config.ts`
+  - ChainConfig に `apiBaseUrl`, `apiKeyEnv`, `useChainIdParam` 追加（将来の代替API対応の基盤）
+  - BSC設定追加（参考用に保持、ただし `SUPPORTED_CHAIN_IDS` からは除外）
+  - **`SUPPORTED_CHAIN_IDS = ["1", "137"]` のままmainと同じ**（BSCはAPI取得しない）
+- `lib/etherscan.ts`
+  - `EtherscanAPI` コンストラクタが `ChainConfig` も受け取れるように拡張
+  - `apiBaseUrl` / `useChainIdParam` ベースでURL構築
+  - エラーメッセージに `result` 詳細を含めるよう改善
+- `lib/transaction-converter.ts`
+  - trustedTokens に BNB/WBNB/CAKE/MCAKE/BUSD/ETH 追加
+  - paymentTokenSymbols, groupSelfTokenMovementPairs の excludeSymbols に BNB/WBNB 追加
+  - WELL_KNOWN_TOKENS に BSC主要トークン7種追加
+- `app/api/export/route.ts`
+  - **multipart/form-data 対応**: `importExcel` フィールドでExcelアップロード受付
+  - インポートExcel エントリを `allEntries` に追加（タイムスタンプソート対象）
+  - 1チェーン失敗で全停止しないエラーハンドリング（`skippedChains` 記録）
+  - チェーン別 `apiKeyEnv` から API キー取得
+- `app/api/transactions/route.ts`
+  - 同様の skip 対応・チェーン別キー取得
+- `app/page.tsx`
+  - タイトル「ETH + Polygon + BSC手動」に変更
+  - BNB Excel ファイルアップロード input 追加（任意）
+  - `handleExport` を `FormData` 経由送信に対応（ファイル選択時のみ）
+
+### ビルド状況
+- ✅ `npm run build` 成功（TypeScriptエラーなし、7ルート生成）
+
+### 中断時の状態（2026-05-16）
+
+```
+ブランチ: feature/bsc-support
+コミット: なし（main から進んでいない）
+変更ファイル（未コミット）:
+  modified:   app/api/export/route.ts          +82/-12
+  modified:   app/api/transactions/route.ts    +21/-20
+  modified:   app/page.tsx                     +52/-13
+  modified:   lib/chain-config.ts              +27/-4
+  modified:   lib/etherscan.ts                 +30/-7
+  modified:   lib/transaction-converter.ts     +10/-3
+  untracked:  lib/excel-importer.ts            +新規118行
+```
+
+### 次回再開時の作業手順
+
+#### 1. 動作確認（最優先）
+```bash
+# 別ターミナルで dev サーバー起動
+cd /Users/gotohiro/Documents/user/Products/Crypto-kakeibo
+npm run dev
+```
+
+ブラウザ http://localhost:3000:
+- メイン: `0x01b27ec780c534ba0fab15509354c3798321273c`
+- サブ: `0x581087E117A68537b624e0352833dB96654c0481`
+- 対象年: `2025`
+- **BNB等 手動入力Excel**: `参考/確定申告2025BNB.xlsx` を選択
+- Excelダウンロード
+
+**期待**: ETH 37行 + POL 31行 + BSC 50行 = **118行**統合Excel（タイムスタンプ順）
+
+#### 2. 結果検証
+- 出力先候補: `自動生成_ETHPOL/確定申告2025仮想通貨_BSC統合_1.xlsx` 等
+- 行数確認、BSCエントリが `取引詳細="手動入力（BNB等のExcelインポート）"` で識別可能
+- タイムスタンプソートが正しく機能しているか確認
+
+#### 3. 問題なければコミット → main マージ
+```bash
+git add lib/excel-importer.ts lib/chain-config.ts lib/etherscan.ts \
+        lib/transaction-converter.ts app/api/export/route.ts \
+        app/api/transactions/route.ts app/page.tsx
+git commit -m "feat: BSC等を手動Excelインポートで統合する仕組みを追加"
+git checkout main
+git merge --no-ff feature/bsc-support
+git push origin main
+```
+
+### 設計判断の記録
+
+- **なぜAPI自動取得を諦めたか**: Etherscan Pro $199/月は個人の確定申告には過剰、年1回手動準備で十分
+- **なぜchain-config.tsにBSCを残したか**: 将来Etherscanが無料BSC対応した時に `SUPPORTED_CHAIN_IDS` に "56" を追加するだけで即座に切り替え可能
+- **`apiBaseUrl`/`apiKeyEnv`/`useChainIdParam` を追加した理由**: 将来 BscScan独自APIキー入手や別チェーン対応で代替APIを使う場合のための基盤
+- **インポートExcelの取引詳細**: `"手動入力（BNB等のExcelインポート）"` で識別可能 → 後で監査・再生成判定に活用可能
+
+### 既知の制約
+- インポートExcelは「列1-10、1行目ヘッダー」形式のみ対応
+- ファイル形式バリデーションは最小限（壊れたファイルは400エラー）
+- 1ファイルのみアップロード可能（複数ブロックチェーン分を1ファイルにまとめる必要あり、または将来複数対応）
+
+---
+
+## 過去の作業記録（2026-05-15）FNCT手数料グループ化・10YETH無料mintボーナス化・main統合
 
 ### 作業概要
 前回(2026-05-14)で実装した Polygon 対応(v8)を main にマージし、中優先度の分類改善2点を実装。
