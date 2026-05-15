@@ -65,7 +65,7 @@ export default function Home() {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `確定申告${year}ETH.xlsx`;
+      a.download = `確定申告${year}仮想通貨.xlsx`;
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
@@ -77,11 +77,48 @@ export default function Home() {
     }
   };
 
+  // チェーン別の取得結果を表示するヘルパー
+  const renderChainResults = () => {
+    if (!result?.chains) return null;
+
+    return Object.entries(result.chains).map(([chainName, data]: [string, any]) => (
+      <div key={chainName} className="mb-6">
+        <h3 className="text-lg font-bold mb-3">{chainName}</h3>
+        <div className="grid grid-cols-2 gap-4">
+          <div className="bg-blue-50 p-4 rounded">
+            <div className="text-sm text-gray-600">通常トランザクション</div>
+            <div className="text-2xl font-bold text-blue-600">
+              {data.transactions?.length || 0}件
+            </div>
+          </div>
+          <div className="bg-green-50 p-4 rounded">
+            <div className="text-sm text-gray-600">Internal TX</div>
+            <div className="text-2xl font-bold text-green-600">
+              {data.internalTxs?.length || 0}件
+            </div>
+          </div>
+          <div className="bg-purple-50 p-4 rounded">
+            <div className="text-sm text-gray-600">トークン転送</div>
+            <div className="text-2xl font-bold text-purple-600">
+              {data.tokenTransfers?.length || 0}件
+            </div>
+          </div>
+          <div className="bg-pink-50 p-4 rounded">
+            <div className="text-sm text-gray-600">NFT転送</div>
+            <div className="text-2xl font-bold text-pink-600">
+              {data.nftTransfers?.length || 0}件
+            </div>
+          </div>
+        </div>
+      </div>
+    ));
+  };
+
   return (
     <div className="min-h-screen bg-gray-50 py-12 px-4">
       <div className="max-w-4xl mx-auto">
         <h1 className="text-4xl font-bold text-gray-900 mb-8 text-center">
-          仮想通貨取引履歴取得（ETH）
+          仮想通貨取引履歴取得（ETH + Polygon）
         </h1>
 
         <div className="bg-white rounded-lg shadow p-6 mb-6">
@@ -153,32 +190,7 @@ export default function Home() {
         {result && (
           <div className="bg-white rounded-lg shadow p-6">
             <h2 className="text-2xl font-bold mb-4">取得結果</h2>
-            <div className="grid grid-cols-2 gap-4 mb-6">
-              <div className="bg-blue-50 p-4 rounded">
-                <div className="text-sm text-gray-600">通常トランザクション</div>
-                <div className="text-2xl font-bold text-blue-600">
-                  {result.transactions?.length || 0}件
-                </div>
-              </div>
-              <div className="bg-green-50 p-4 rounded">
-                <div className="text-sm text-gray-600">Internal TX</div>
-                <div className="text-2xl font-bold text-green-600">
-                  {result.internalTxs?.length || 0}件
-                </div>
-              </div>
-              <div className="bg-purple-50 p-4 rounded">
-                <div className="text-sm text-gray-600">トークン転送</div>
-                <div className="text-2xl font-bold text-purple-600">
-                  {result.tokenTransfers?.length || 0}件
-                </div>
-              </div>
-              <div className="bg-pink-50 p-4 rounded">
-                <div className="text-sm text-gray-600">NFT転送</div>
-                <div className="text-2xl font-bold text-pink-600">
-                  {result.nftTransfers?.length || 0}件
-                </div>
-              </div>
-            </div>
+            {renderChainResults()}
 
             <details className="mt-4">
               <summary className="cursor-pointer text-blue-600 hover:text-blue-800 font-medium">

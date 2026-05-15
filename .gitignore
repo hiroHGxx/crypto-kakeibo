@@ -50,3 +50,8 @@ output/*.xlsx
 
 # local reference exports
 参考_自動生成/
+
+# local debug / verification scripts (kept locally, not tracked)
+debug-*.js
+verify-*.js
+compare-*.js

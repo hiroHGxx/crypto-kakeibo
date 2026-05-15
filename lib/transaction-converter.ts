@@ -8,6 +8,14 @@ import {
   evaluateClassificationRules,
   type RuleContext,
 } from "./classification-rules";
+import {
+  type ChainConfig,
+  CHAIN_CONFIGS,
+  ERC20_TRANSFER_TOPIC,
+  WETH_DEPOSIT_TOPIC,
+  WETH_WITHDRAWAL_TOPIC,
+  NULL_ADDRESS,
+} from "./chain-config";
 
 // Unix timestamp を JST の日時文字列に変換
 function formatJSTDate(timestamp: string): string {
@@ -122,7 +130,12 @@ function isSpamNFT(
   const symbol = (transfer.tokenSymbol || "").toLowerCase();
   const combined = `${name} ${symbol}`;
 
-  // URL誘導系のNFTはスパムとして扱う
+  // キリル文字偽装NFTはスパム
+  if (containsHomoglyph(transfer.tokenName || "") || containsHomoglyph(transfer.tokenSymbol || "")) {
+    return true;
+  }
+
+  // URL誘導系・詐欺系のNFTはスパムとして扱う
   const suspiciousPatterns = [
     "http://",
     "https://",
@@ -130,11 +143,31 @@ function isSpamNFT(
     ".com",
     ".io",
     ".xyz",
+    ".lat",
+    ".org",
     "claim",
     "visit",
+    "reward",
+    "gift",
+    "redeem",
+    "t.me/",
+    "t.ly/",
   ];
 
   if (suspiciousPatterns.some((pattern) => combined.includes(pattern))) {
+    return true;
+  }
+
+  // 無名NFT（tokenName が "1" や空文字、数字のみ）は常にスパム
+  // 正規のNFTは必ず名前がつけられている
+  const trimmedName = (transfer.tokenName || "").trim();
+  if (trimmedName === "" || /^\d+$/.test(trimmedName)) {
+    return true;
+  }
+
+  // tokenSymbol も同様にチェック（ERC1155でtokenNameが正常でもsymbolが数字のみの場合）
+  const trimmedSymbol = (transfer.tokenSymbol || "").trim();
+  if (trimmedSymbol === "" || /^\d+$/.test(trimmedSymbol)) {
     return true;
   }
 
@@ -144,8 +177,10 @@ function isSpamNFT(
 // 通常トランザクションを会計エントリに変換
 export function convertTransactionToEntry(
   tx: EtherscanTransaction,
-  userAddresses: string | string[]
+  userAddresses: string | string[],
+  chainConfig?: ChainConfig
 ): AccountingEntry | null {
+  const config = chainConfig || CHAIN_CONFIGS["1"];
   const ownAddressSet = toOwnAddressSet(userAddresses);
   const isOutgoing = isOwnAddress(tx.from, ownAddressSet);
   const isIncoming = isOwnAddress(tx.to, ownAddressSet);
@@ -157,7 +192,7 @@ export function convertTransactionToEntry(
   if (isOutgoing && isIncoming) {
     if (fee > 0) {
       return {
-        取引所名: "metamask",
+        取引所名: config.exchangeName,
         "日時（JST）": formatJSTDate(tx.timeStamp),
         取引種別: "手数料",
         "取引通貨名(+)": "",
@@ -165,7 +200,7 @@ export function convertTransactionToEntry(
         "取引通貨名(-)": "",
         "取引量(-)": "",
         取引額時価: "",
-        手数料通貨名: "ETH",
+        手数料通貨名: config.nativeToken,
         手数料数量: fee,
         取引詳細: tx.methodId || "",
       };
@@ -176,7 +211,7 @@ export function convertTransactionToEntry(
   // 手数料のみのトランザクション（valueが0）
   if (value === 0 && fee > 0) {
     return {
-      取引所名: "metamask",
+      取引所名: config.exchangeName,
       "日時（JST）": formatJSTDate(tx.timeStamp),
       取引種別: "手数料",
       "取引通貨名(+)": "",
@@ -184,7 +219,7 @@ export function convertTransactionToEntry(
       "取引通貨名(-)": "",
       "取引量(-)": "",
       取引額時価: "",
-      手数料通貨名: "ETH",
+      手数料通貨名: config.nativeToken,
       手数料数量: fee,
       取引詳細: tx.methodId || "",
     };
@@ -193,15 +228,15 @@ export function convertTransactionToEntry(
   // 送金トランザクション
   if (isOutgoing) {
     return {
-      取引所名: "metamask",
+      取引所名: config.exchangeName,
       "日時（JST）": formatJSTDate(tx.timeStamp),
       取引種別: "送付",
       "取引通貨名(+)": "",
       "取引量(+)": "",
-      "取引通貨名(-)": "ETH",
+      "取引通貨名(-)": config.nativeToken,
       "取引量(-)": value,
       取引額時価: "",
-      手数料通貨名: "ETH",
+      手数料通貨名: config.nativeToken,
       手数料数量: fee,
       取引詳細: tx.methodId || "",
       ...reviewFields(
@@ -211,10 +246,10 @@ export function convertTransactionToEntry(
     };
   } else {
     return {
-      取引所名: "metamask",
+      取引所名: config.exchangeName,
       "日時（JST）": formatJSTDate(tx.timeStamp),
       取引種別: "受取",
-      "取引通貨名(+)": "ETH",
+      "取引通貨名(+)": config.nativeToken,
       "取引量(+)": value,
       "取引通貨名(-)": "",
       "取引量(-)": "",
@@ -230,6 +265,12 @@ export function convertTransactionToEntry(
   }
 }
 
+// キリル文字等のホモグリフ（偽装文字）が含まれているか判定
+function containsHomoglyph(text: string): boolean {
+  // キリル文字範囲（ラテン文字の偽装に使われる）
+  return /[\u0400-\u04FF\u0500-\u052F]/.test(text);
+}
+
 // スパムトークンかどうかを判定
 function isSpamToken(
   transfer: EtherscanTokenTransfer,
@@ -238,18 +279,46 @@ function isSpamToken(
   const ownAddressSet = toOwnAddressSet(userAddresses);
   const isIncoming = isOwnAddress(transfer.to, ownAddressSet);
 
-  // 送信トランザクションはスパムではない
+  const symbol = (transfer.tokenSymbol || "").toUpperCase();
+  const name = (transfer.tokenName || "").toLowerCase();
+  const combined = `${name} ${symbol}`.toLowerCase();
+
+  // キリル文字偽装トークン（EТH, UЅDС等）は送信・受信問わずスパム
+  if (containsHomoglyph(transfer.tokenSymbol || "") || containsHomoglyph(transfer.tokenName || "")) {
+    return true;
+  }
+
+  // 送信トランザクションはキリル文字以外のスパム判定はスキップ
   if (!isIncoming) {
     return false;
+  }
+
+  // URL・詐欺誘導パターン
+  const spamPatterns = [
+    "http://", "https://", "www.", ".com", ".io", ".xyz", ".lat", ".org",
+    "claim", "visit", "reward", "gift", "redeem", "airdrop",
+    "t.me/", "t.ly/",
+  ];
+  if (spamPatterns.some((pattern) => combined.includes(pattern))) {
+    return true;
+  }
+
+  // 既知のスパムトークンシンボル
+  const knownSpamSymbols = [
+    "AM00R", "SEB",
+  ];
+  if (knownSpamSymbols.includes(symbol)) {
+    return true;
   }
 
   // 信頼できるトークンのホワイトリスト
   const trustedTokens = [
     'WETH', 'USDT', 'USDC', 'DAI', 'WBTC', 'LINK', 'UNI', 'AAVE',
-    'MATIC', 'SHIB', 'APE', 'LDO', 'CRV', 'MKR', 'SNX', 'COMP'
+    'MATIC', 'SHIB', 'APE', 'LDO', 'CRV', 'MKR', 'SNX', 'COMP',
+    'WMATIC', 'POL', 'WPOL', 'SAND', 'FNCT', 'CNGT', 'JPYC',
   ];
 
-  if (trustedTokens.includes(transfer.tokenSymbol.toUpperCase())) {
+  if (trustedTokens.includes(symbol)) {
     return false;
   }
 
@@ -273,8 +342,11 @@ function isSpamToken(
 // トークン転送を会計エントリに変換
 export function convertTokenTransferToEntry(
   transfer: EtherscanTokenTransfer,
-  userAddresses: string | string[]
+  userAddresses: string | string[],
+  chainConfig?: ChainConfig
 ): AccountingEntry | null {
+  const config = chainConfig || CHAIN_CONFIGS["1"];
+
   // スパムトークンをフィルタリング
   if (isSpamToken(transfer, userAddresses)) {
     return null;
@@ -292,9 +364,14 @@ export function convertTokenTransferToEntry(
   const value = parseFloat(transfer.value) / Math.pow(10, parseInt(transfer.tokenDecimal));
   const fee = (parseFloat(transfer.gasUsed) * parseFloat(transfer.gasPrice)) / 1e18;
 
+  // value=0のトークン転送はスキップ（意味のない転送）
+  if (value === 0) {
+    return null;
+  }
+
   if (isOutgoing) {
     return {
-      取引所名: "metamask",
+      取引所名: config.exchangeName,
       "日時（JST）": formatJSTDate(transfer.timeStamp),
       取引種別: "送付",
       "取引通貨名(+)": "",
@@ -302,7 +379,7 @@ export function convertTokenTransferToEntry(
       "取引通貨名(-)": transfer.tokenSymbol,
       "取引量(-)": value,
       取引額時価: "",
-      手数料通貨名: "ETH",
+      手数料通貨名: config.nativeToken,
       手数料数量: fee,
       取引詳細: transfer.tokenName,
       ...reviewFields(
@@ -312,7 +389,7 @@ export function convertTokenTransferToEntry(
     };
   } else {
     return {
-      取引所名: "metamask",
+      取引所名: config.exchangeName,
       "日時（JST）": formatJSTDate(transfer.timeStamp),
       取引種別: "受取",
       "取引通貨名(+)": transfer.tokenSymbol,
@@ -334,10 +411,13 @@ export function convertTokenTransferToEntry(
 // NFT転送を会計エントリに変換
 export function convertNFTTransferToEntry(
   transfer: EtherscanNFTTransfer,
-  userAddresses: string | string[]
+  userAddresses: string | string[],
+  chainConfig?: ChainConfig
 ): AccountingEntry | null {
+  const config = chainConfig || CHAIN_CONFIGS["1"];
+
   if (isSpamNFT(transfer, userAddresses)) {
-    throw new Error("Spam NFT should be filtered before conversion");
+    return null;
   }
 
   const ownAddressSet = toOwnAddressSet(userAddresses);
@@ -366,7 +446,7 @@ export function convertNFTTransferToEntry(
 
   if (isOutgoing) {
     return {
-      取引所名: "metamask",
+      取引所名: config.exchangeName,
       "日時（JST）": formatJSTDate(transfer.timeStamp),
       取引種別: "送付",
       "取引通貨名(+)": "",
@@ -374,7 +454,7 @@ export function convertNFTTransferToEntry(
       "取引通貨名(-)": nftName,
       "取引量(-)": nftQuantity,
       取引額時価: "",
-      手数料通貨名: fee > 0 ? "ETH" : "",
+      手数料通貨名: fee > 0 ? config.nativeToken : "",
       手数料数量: fee > 0 ? fee : "",
       取引詳細: detailName,
       ...reviewFields(
@@ -384,7 +464,7 @@ export function convertNFTTransferToEntry(
     };
   } else {
     return {
-      取引所名: "metamask",
+      取引所名: config.exchangeName,
       "日時（JST）": formatJSTDate(transfer.timeStamp),
       取引種別: "受取",
       "取引通貨名(+)": nftName,
@@ -410,7 +490,8 @@ function groupNFTTrades(
   tokenTransfers: EtherscanTokenTransfer[],
   nftTransfers: EtherscanNFTTransfer[],
   erc1155Transfers: EtherscanNFTTransfer[],
-  userAddresses: string | string[]
+  userAddresses: string | string[],
+  chainConfig?: ChainConfig
 ): Map<
   string,
   Array<{
@@ -437,8 +518,8 @@ function groupNFTTrades(
   >();
   const ownAddressSet = toOwnAddressSet(userAddresses);
 
+  const config = chainConfig || CHAIN_CONFIGS["1"];
   // スパム除外後の全NFT転送（ERC721 + ERC1155）をハッシュでマッピング
-  const NULL_ADDRESS = "0x0000000000000000000000000000000000000000";
   const nftByHash = new Map<string, EtherscanNFTTransfer[]>();
   [...nftTransfers, ...erc1155Transfers]
     .filter((nft) => !isSpamNFT(nft, userAddresses))
@@ -450,10 +531,14 @@ function groupNFTTrades(
       nftByHash.set(nft.hash, list);
     });
 
-  // 支払いに使われるトークン転送（ETH/WETHのみ）をハッシュでマッピング
+  // 支払いに使われるトークン転送（ネイティブトークン/Wrappedトークン）をハッシュでマッピング
+  const paymentTokenSymbols = new Set([
+    config.nativeToken, config.wrappedNativeToken,
+    "ETH", "WETH", "MATIC", "WMATIC", "POL",
+  ]);
   const paymentTokensByHash = new Map<string, EtherscanTokenTransfer[]>();
   tokenTransfers.forEach((token) => {
-    if (token.tokenSymbol !== "WETH" && token.tokenSymbol !== "ETH") {
+    if (!paymentTokenSymbols.has(token.tokenSymbol)) {
       return;
     }
     const list = paymentTokensByHash.get(token.hash) || [];
@@ -467,6 +552,8 @@ function groupNFTTrades(
   });
 
   const internalPaymentsByHash = new Map<string, number[]>();
+  // ユーザー宛のInternal TX受取額（マーケットプレイスNFT売却検出用）
+  const internalReceivedByHash = new Map<string, number[]>();
   internalTxs.forEach((tx) => {
     const value = weiToEth(tx.value);
     if (value <= 0) {
@@ -475,6 +562,11 @@ function groupNFTTrades(
     const list = internalPaymentsByHash.get(tx.hash) || [];
     list.push(value);
     internalPaymentsByHash.set(tx.hash, list);
+    if (isOwnAddress(tx.to, ownAddressSet)) {
+      const rList = internalReceivedByHash.get(tx.hash) || [];
+      rList.push(value);
+      internalReceivedByHash.set(tx.hash, rList);
+    }
   });
 
   nftByHash.forEach((nfts, hash) => {
@@ -597,6 +689,27 @@ function groupNFTTrades(
       trades.set(hash, groupedTrades);
       return;
     }
+
+    // マーケットプレイス経由NFT売却検出:
+    // 通常TXが存在しない（買い手が発信者）が、自分のNFT OUT + Internal TXでPOL受取がある
+    const nftOuts = nfts.filter((nft) => isOwnAddress(nft.from, ownAddressSet));
+    const received = internalReceivedByHash.get(hash) || [];
+    if (nftOuts.length > 0 && received.length > 0) {
+      const totalReceived = received.reduce((sum, v) => sum + v, 0);
+      nftOuts.forEach((nft) => {
+        const perNFTValue = totalReceived / nftOuts.length;
+        groupedTrades.push({
+          nft,
+          paymentValueOverride: perNFTValue,
+          feeOverride: 0, // 買い手がガス代を負担
+          reviewReason: nftOuts.length > 1
+            ? "マーケットプレイスNFT売却（複数NFT按分・要確認）"
+            : undefined,
+        });
+      });
+      trades.set(hash, groupedTrades);
+      return;
+    }
   });
 
   return trades;
@@ -613,8 +726,16 @@ function convertNFTTradeToEntry(
     reviewReason?: string;
     suggestedType?: string;
   },
-  userAddresses: string | string[]
-): AccountingEntry {
+  userAddresses: string | string[],
+  chainConfig?: ChainConfig
+): AccountingEntry | null {
+  const config = chainConfig || CHAIN_CONFIGS["1"];
+
+  // スパムNFTは変換しない
+  if (isSpamNFT(trade.nft, userAddresses)) {
+    return null;
+  }
+
   const ownAddressSet = toOwnAddressSet(userAddresses);
   const isNFTIncoming = isOwnAddress(trade.nft.to, ownAddressSet);
 
@@ -636,9 +757,9 @@ function convertNFTTradeToEntry(
       ((parseFloat(trade.token.gasUsed) * parseFloat(trade.token.gasPrice)) / 1e18);
     timestamp = trade.token.timeStamp;
   } else if (trade.transaction) {
-    // 通常トランザクション（ETH）での支払い
+    // 通常トランザクション（ネイティブトークン）での支払い
     paymentValue = trade.paymentValueOverride ?? weiToEth(trade.transaction.value);
-    paymentSymbol = "ETH";
+    paymentSymbol = config.nativeToken;
     fee =
       trade.feeOverride ??
       ((parseFloat(trade.transaction.gasUsed) * parseFloat(trade.transaction.gasPrice)) / 1e18);
@@ -648,6 +769,12 @@ function convertNFTTradeToEntry(
     if (paymentValue === 0) {
       isTrade = false;
     }
+  } else if (trade.paymentValueOverride !== undefined) {
+    // マーケットプレイス売却等: TXは買い手発行だがInternal TXで代金受取
+    paymentValue = trade.paymentValueOverride;
+    paymentSymbol = config.nativeToken;
+    fee = trade.feeOverride ?? 0;
+    timestamp = trade.nft.timeStamp;
   } else {
     throw new Error("Invalid trade: no payment method found");
   }
@@ -675,7 +802,7 @@ function convertNFTTradeToEntry(
     if (isNFTIncoming) {
       // NFT受取
       return {
-        取引所名: "metamask",
+        取引所名: config.exchangeName,
         "日時（JST）": formatJSTDate(timestamp),
         取引種別: "受取",
         "取引通貨名(+)": nftName,
@@ -683,7 +810,7 @@ function convertNFTTradeToEntry(
         "取引通貨名(-)": "",
         "取引量(-)": "",
         取引額時価: "",
-        手数料通貨名: "ETH",
+        手数料通貨名: config.nativeToken,
         手数料数量: fee,
         取引詳細: detailName,
         ...tradeReviewFields,
@@ -695,7 +822,7 @@ function convertNFTTradeToEntry(
     } else {
       // NFT送付
       return {
-        取引所名: "metamask",
+        取引所名: config.exchangeName,
         "日時（JST）": formatJSTDate(timestamp),
         取引種別: "送付",
         "取引通貨名(+)": "",
@@ -703,7 +830,7 @@ function convertNFTTradeToEntry(
         "取引通貨名(-)": nftName,
         "取引量(-)": nftQuantity,
         取引額時価: "",
-        手数料通貨名: "ETH",
+        手数料通貨名: config.nativeToken,
         手数料数量: fee,
         取引詳細: detailName,
         ...tradeReviewFields,
@@ -719,7 +846,7 @@ function convertNFTTradeToEntry(
   if (isNFTIncoming) {
     // NFT購入: NFTを受取、トークン/ETHを支払い
     return {
-      取引所名: "metamask",
+      取引所名: config.exchangeName,
       "日時（JST）": formatJSTDate(timestamp),
       取引種別: "売買",
       "取引通貨名(+)": nftName,
@@ -727,7 +854,7 @@ function convertNFTTradeToEntry(
       "取引通貨名(-)": paymentSymbol,
       "取引量(-)": paymentValue,
       取引額時価: "",
-      手数料通貨名: "ETH",
+      手数料通貨名: config.nativeToken,
       手数料数量: fee,
       取引詳細: detailName,
       ...tradeReviewFields,
@@ -735,7 +862,7 @@ function convertNFTTradeToEntry(
   } else {
     // NFT売却: トークン/ETHを受取、NFTを支払い
     return {
-      取引所名: "metamask",
+      取引所名: config.exchangeName,
       "日時（JST）": formatJSTDate(timestamp),
       取引種別: "売買",
       "取引通貨名(+)": paymentSymbol,
@@ -743,7 +870,7 @@ function convertNFTTradeToEntry(
       "取引通貨名(-)": nftName,
       "取引量(-)": nftQuantity,
       取引額時価: "",
-      手数料通貨名: "ETH",
+      手数料通貨名: config.nativeToken,
       手数料数量: fee,
       取引詳細: detailName,
       ...tradeReviewFields,
@@ -751,37 +878,32 @@ function convertNFTTradeToEntry(
   }
 }
 
-function convertEthWethSwapToEntry(
+function convertNativeWrappedSwapToEntry(
   hash: string,
-  direction: "ETH_TO_WETH" | "WETH_TO_ETH",
+  direction: "NATIVE_TO_WRAPPED" | "WRAPPED_TO_NATIVE",
   timestamp: string,
-  ethAmount: number,
-  wethAmount: number,
-  fee: number
+  nativeAmount: number,
+  wrappedAmount: number,
+  fee: number,
+  chainConfig?: ChainConfig
 ): AccountingEntry {
-  const isEthToWeth = direction === "ETH_TO_WETH";
+  const config = chainConfig || CHAIN_CONFIGS["1"];
+  const isNativeToWrapped = direction === "NATIVE_TO_WRAPPED";
   return {
-    取引所名: "metamask",
+    取引所名: config.exchangeName,
     "日時（JST）": formatJSTDate(timestamp),
     取引種別: "売買",
-    "取引通貨名(+)": isEthToWeth ? "WETH" : "ETH",
-    "取引量(+)": isEthToWeth ? wethAmount : ethAmount,
-    "取引通貨名(-)": isEthToWeth ? "ETH" : "WETH",
-    "取引量(-)": isEthToWeth ? ethAmount : wethAmount,
+    "取引通貨名(+)": isNativeToWrapped ? config.wrappedNativeToken : config.nativeToken,
+    "取引量(+)": isNativeToWrapped ? wrappedAmount : nativeAmount,
+    "取引通貨名(-)": isNativeToWrapped ? config.nativeToken : config.wrappedNativeToken,
+    "取引量(-)": isNativeToWrapped ? nativeAmount : wrappedAmount,
     取引額時価: "",
-    手数料通貨名: fee > 0 ? "ETH" : "",
+    手数料通貨名: fee > 0 ? config.nativeToken : "",
     手数料数量: fee > 0 ? fee : "",
-    取引詳細: `ETH-WETH swap (${hash.slice(0, 10)}...)`,
+    取引詳細: `${config.nativeToken}-${config.wrappedNativeToken} swap (${hash.slice(0, 10)}...)`,
   };
 }
 
-const WETH_CONTRACT_ADDRESS = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
-const ERC20_TRANSFER_TOPIC =
-  "0xddf252ad1be2c4a6e811865b0a1f5b4f27e8d018e0c4f1ae2f9e7e5c2fb4f0b2";
-const WETH_DEPOSIT_TOPIC =
-  "0xe1fffcc4923d04b559f4d29a8bfc6cda04eb5b0d3c460751c2402c5c5cc9109c";
-const WETH_WITHDRAWAL_TOPIC =
-  "0x7fcf532c15f0a6db0bd6d0e038bea71d30d808c7d98cb3bf7268a95bf5081b65";
 const METAMASK_BRIDGE_PREFIXES = ["0x9a47f328"];
 
 function isMetaMaskBridgeAddress(address: string): boolean {
@@ -808,8 +930,11 @@ export function convertAllTransactions(
   userAddresses: string | string[],
   year?: number,
   erc1155Transfers?: EtherscanNFTTransfer[],
-  receiptsByHash?: Record<string, any>
+  receiptsByHash?: Record<string, any>,
+  chainConfig?: ChainConfig
 ): AccountingEntry[] {
+  const config = chainConfig || CHAIN_CONFIGS["1"];
+  const WRAPPED_CONTRACT_ADDRESS = config.wrappedNativeAddress;
   const entries: AccountingEntry[] = [];
   const erc1155 = erc1155Transfers || [];
   const ownAddressSet = toOwnAddressSet(userAddresses);
@@ -829,7 +954,8 @@ export function convertAllTransactions(
     tokenTransfers,
     nftTransfers,
     erc1155,
-    userAddresses
+    userAddresses,
+    config
   );
   const processedHashes = new Set<string>();
   const isProcessed = (hash: string) => processedHashes.has(normalizeHash(hash));
@@ -842,10 +968,13 @@ export function convertAllTransactions(
     let hasEntryInYear = false;
     trades.forEach((trade) => {
       const timestamp =
-        trade.token?.timeStamp || trade.transaction?.timeStamp || "";
+        trade.token?.timeStamp || trade.transaction?.timeStamp || trade.nft.timeStamp || "";
       if (isInYear(timestamp)) {
-        entries.push(convertNFTTradeToEntry(trade, userAddresses));
-        hasEntryInYear = true;
+        const entry = convertNFTTradeToEntry(trade, userAddresses, config);
+        if (entry) {
+          entries.push(entry);
+          hasEntryInYear = true;
+        }
       }
     });
     if (hasEntryInYear) {
@@ -866,13 +995,22 @@ export function convertAllTransactions(
     list.push(tx);
     internalByHash.set(tx.hash, list);
   });
+
+  // 自分が発信者（gas代負担）のTXハッシュセット（ボーナス判定用）
+  const ownInitiatedTxHashes = new Set<string>();
+  transactions.forEach((tx) => {
+    if (isOwnAddress(tx.from, ownAddressSet)) {
+      ownInitiatedTxHashes.add(tx.hash);
+    }
+  });
+
   const nftTransferHashSet = new Set<string>([
     ...nftTransfers.map((transfer) => transfer.hash),
     ...erc1155.map((transfer) => transfer.hash),
   ]);
   const wethByHash = new Map<string, EtherscanTokenTransfer[]>();
   tokenTransfers.forEach((transfer) => {
-    if (transfer.tokenSymbol !== "WETH") return;
+    if (transfer.tokenSymbol !== config.wrappedNativeToken) return;
     const list = wethByHash.get(transfer.hash) || [];
     list.push(transfer);
     wethByHash.set(transfer.hash, list);
@@ -880,13 +1018,16 @@ export function convertAllTransactions(
 
   const swapCandidateHashes = new Set<string>(wethByHash.keys());
   txByHash.forEach((txs, hash) => {
-    const hasMetamaskBridgeCall = txs.some(
-      (tx) =>
-        isOwnAddress(tx.from, ownAddressSet) &&
-        isMetaMaskBridgeAddress(tx.to || "")
-    );
-    if (hasMetamaskBridgeCall) {
-      swapCandidateHashes.add(hash);
+    // MetaMask Bridge検出はEthereum(chainId="1")のみ
+    if (config.chainId === "1") {
+      const hasMetamaskBridgeCall = txs.some(
+        (tx) =>
+          isOwnAddress(tx.from, ownAddressSet) &&
+          isMetaMaskBridgeAddress(tx.to || "")
+      );
+      if (hasMetamaskBridgeCall) {
+        swapCandidateHashes.add(hash);
+      }
     }
 
     const hasWethContractCall = txs.some((tx) => {
@@ -895,7 +1036,7 @@ export function convertAllTransactions(
       const from = (tx.from || "").toLowerCase();
       const isOwnTx = isOwnAddress(from, ownAddressSet);
       return (
-        to === WETH_CONTRACT_ADDRESS &&
+        to === WRAPPED_CONTRACT_ADDRESS &&
         isOwnTx &&
         (method === "0xd0e30db0" || method === "0x2e1a7d4d" || weiToEth(tx.value) > 0)
       );
@@ -918,13 +1059,68 @@ export function convertAllTransactions(
   });
   internalByHash.forEach((txs, hash) => {
     const hasToWeth = txs.some(
-      (tx) => (tx.to || "").toLowerCase() === WETH_CONTRACT_ADDRESS && weiToEth(tx.value) > 0
+      (tx) => (tx.to || "").toLowerCase() === WRAPPED_CONTRACT_ADDRESS && weiToEth(tx.value) > 0
     );
     const hasFromWeth = txs.some(
-      (tx) => (tx.from || "").toLowerCase() === WETH_CONTRACT_ADDRESS && weiToEth(tx.value) > 0
+      (tx) => (tx.from || "").toLowerCase() === WRAPPED_CONTRACT_ADDRESS && weiToEth(tx.value) > 0
     );
     if (hasToWeth || hasFromWeth) {
       swapCandidateHashes.add(hash);
+    }
+  });
+
+  // 自分がトークンを送出しているTXでreceiptがある場合もswap候補に追加
+  // （Bridge+DEX: SAND→WETH等、value=0でWMATIC経由しないケース）
+  tokenTransfers.forEach((t) => {
+    if (!isInYear(t.timeStamp)) return;
+    if (isOwnAddress(t.from, ownAddressSet) && !isSpamToken(t, userAddresses)) {
+      const hash = t.hash;
+      if (receiptsByHash?.[hash.toLowerCase()] && !swapCandidateHashes.has(hash)) {
+        swapCandidateHashes.add(hash);
+      }
+    }
+  });
+
+  // DEX Token-to-Token swap検出（swap候補外のトークン間交換）
+  // 同一ハッシュで自分がトークンを送出＋受取している場合はDEXスワップ
+  const tokenTransfersByHash = new Map<string, EtherscanTokenTransfer[]>();
+  tokenTransfers.forEach((t) => {
+    if (!isInYear(t.timeStamp)) return;
+    const list = tokenTransfersByHash.get(t.hash) || [];
+    list.push(t);
+    tokenTransfersByHash.set(t.hash, list);
+  });
+
+  // receipt logsからDEX出力トークンを検出するためのアドレス→トークン情報マップ
+  const tokenInfoByAddress = new Map<string, { symbol: string; decimals: number }>();
+  tokenTransfers.forEach((t) => {
+    const addr = (t.contractAddress || "").toLowerCase();
+    if (addr && !tokenInfoByAddress.has(addr)) {
+      tokenInfoByAddress.set(addr, {
+        symbol: t.tokenSymbol,
+        decimals: parseInt(t.tokenDecimal),
+      });
+    }
+  });
+  // Polygon well-known tokens（receipt logsにのみ出現する場合のフォールバック）
+  const WELL_KNOWN_TOKENS: Record<string, { symbol: string; decimals: number }> = {
+    // Polygon well-known tokens
+    "0x7ceb23fd6bc0add59e62ac25578270cff1b9f619": { symbol: "WETH", decimals: 18 },
+    "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359": { symbol: "USDC", decimals: 6 },
+    "0x2791bca1f2de4661ed88a30c99a7a9449aa84174": { symbol: "USDC.e", decimals: 6 },
+    "0xc2132d05d31c914a87c6611c10748aeb04b58e8f": { symbol: "USDT", decimals: 6 },
+    "0x8f3cf7ad23cd3cadbd9735aff958023239c6a063": { symbol: "DAI", decimals: 18 },
+    "0xbbba073c31bf03b8acf7c28ef0738decf3695683": { symbol: "SAND", decimals: 18 },
+    "0xc6d54d2f624bc83815b49d9c2203b1330b841ca0": { symbol: "FNCT", decimals: 18 },
+    "0x236eec6359fb44cce8f97e99387aa7f8cd5cde1f": { symbol: "JPYC", decimals: 18 },
+    // Ethereum well-known tokens
+    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": { symbol: "WETH", decimals: 18 },
+    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": { symbol: "USDC", decimals: 6 },
+    "0xdac17f958d2ee523a2206206994597c13d831ec7": { symbol: "USDT", decimals: 6 },
+  };
+  Object.entries(WELL_KNOWN_TOKENS).forEach(([addr, info]) => {
+    if (!tokenInfoByAddress.has(addr)) {
+      tokenInfoByAddress.set(addr, info);
     }
   });
 
@@ -960,7 +1156,7 @@ export function convertAllTransactions(
 
         // WETH Transfer event検出
         if (
-          address === WETH_CONTRACT_ADDRESS &&
+          address === WRAPPED_CONTRACT_ADDRESS &&
           topics.length >= 3 &&
           (topics[0] || "").toLowerCase() === ERC20_TRANSFER_TOPIC.toLowerCase()
         ) {
@@ -977,7 +1173,7 @@ export function convertAllTransactions(
 
         // WETH Deposit event検出（Transfer eventが無い場合の補完）
         if (
-          address === WETH_CONTRACT_ADDRESS &&
+          address === WRAPPED_CONTRACT_ADDRESS &&
           topics.length >= 1 &&
           (topics[0] || "").toLowerCase() === WETH_DEPOSIT_TOPIC.toLowerCase()
         ) {
@@ -987,7 +1183,7 @@ export function convertAllTransactions(
 
         // WETH Withdrawal event検出（WETH→ETH）
         if (
-          address === WETH_CONTRACT_ADDRESS &&
+          address === WRAPPED_CONTRACT_ADDRESS &&
           topics.length >= 1 &&
           (topics[0] || "").toLowerCase() === WETH_WITHDRAWAL_TOPIC.toLowerCase()
         ) {
@@ -996,6 +1192,47 @@ export function convertAllTransactions(
         }
       });
     }
+    // Receipt logsからDEX出力トークン検出（WMATIC以外のERC20トークンがユーザーに転送されている場合）
+    const receiptDexOutputTokens: Array<{ symbol: string; amount: number }> = [];
+    // Bridge+DEX: ユーザーには直接届かず、ブリッジコントラクトに最終トークンが送られるケース
+    let bridgeDexOutput: { symbol: string; amount: number } | null = null;
+    if (receipt && Array.isArray(receipt.logs)) {
+      // 最後に見つかった非WMATIC/非ネイティブのERC20 Transfer（非ユーザー宛）を追跡
+      let lastBridgeSymbol = "";
+      let lastBridgeAmount = 0;
+
+      receipt.logs.forEach((log: any) => {
+        const address = (log.address || "").toLowerCase();
+        const topics: string[] = log.topics || [];
+        if (address === WRAPPED_CONTRACT_ADDRESS) return; // WMATIC/WETHは既存処理で対応済み
+        if (
+          topics.length >= 3 &&
+          (topics[0] || "").toLowerCase() === ERC20_TRANSFER_TOPIC.toLowerCase()
+        ) {
+          const to = hexToAddress(topics[2]);
+          const tokenInfo = tokenInfoByAddress.get(address);
+          if (!tokenInfo) return;
+          const rawAmount = BigInt(log.data || "0x0");
+          const amount = Number(rawAmount) / Math.pow(10, tokenInfo.decimals);
+          if (amount <= 0) return;
+
+          if (isOwnAddress(to, ownAddressSet)) {
+            receiptDexOutputTokens.push({ symbol: tokenInfo.symbol, amount });
+          } else {
+            // Bridge+DEX: 最終トークンがブリッジコントラクトへ送られるケース
+            // 同一金額が連鎖するので最後のものが最終出力
+            lastBridgeSymbol = tokenInfo.symbol;
+            lastBridgeAmount = amount;
+          }
+        }
+      });
+
+      // Bridge DEX output: ユーザーに直接届かないが、ブリッジ経由で受取るトークン
+      if (lastBridgeSymbol && lastBridgeAmount > 0 && receiptDexOutputTokens.length === 0) {
+        bridgeDexOutput = { symbol: lastBridgeSymbol, amount: lastBridgeAmount };
+      }
+    }
+
     const wethIn = Math.max(wethInFromTransfers, wethInFromReceipt, wethDepositAmount);
     const wethOut = Math.max(wethOutFromTransfers, wethOutFromReceipt, wethWithdrawalAmount);
 
@@ -1011,7 +1248,7 @@ export function convertAllTransactions(
     const ethIn = ethInTx + ethInInternal;
     const ethRefund = ethInInternal;
     const ethToWethContract = internal
-      .filter((tx) => (tx.to || "").toLowerCase() === WETH_CONTRACT_ADDRESS)
+      .filter((tx) => (tx.to || "").toLowerCase() === WRAPPED_CONTRACT_ADDRESS)
       .reduce((sum, tx) => sum + weiToEth(tx.value), 0);
 
     const feeTx =
@@ -1023,6 +1260,190 @@ export function convertAllTransactions(
       wethTransfers[0]?.timeStamp || feeTx?.timeStamp || internal[0]?.timeStamp || "";
     if (!timestamp || !isInYear(timestamp)) return;
 
+    // DEXスワップ検出: ネイティブトークンを送出し、別のERC20トークンを受取っている場合
+    // WMATICのDeposit eventがあっても最終的に別トークン（WETH, USDC等）を受取っていればDEXスワップ
+    const hashAllTokenTransfers = tokenTransfersByHash.get(hash) || [];
+    const dexOutputTokens = hashAllTokenTransfers.filter((t) => {
+      const sym = (t.tokenSymbol || "").toUpperCase();
+      return (
+        isOwnAddress(t.to, ownAddressSet) &&
+        sym !== config.wrappedNativeToken.toUpperCase() &&
+        sym !== config.nativeToken.toUpperCase() &&
+        !isSpamToken(t, userAddresses)
+      );
+    });
+    const dexInputTokens = hashAllTokenTransfers.filter((t) => {
+      const sym = (t.tokenSymbol || "").toUpperCase();
+      return (
+        isOwnAddress(t.from, ownAddressSet) &&
+        sym !== config.wrappedNativeToken.toUpperCase() &&
+        sym !== config.nativeToken.toUpperCase() &&
+        !isSpamToken(t, userAddresses)
+      );
+    });
+
+    // Case A: ネイティブトークン → 他のERC20トークンへのDEXスワップ
+    if (ethOut > 0 && !nftTransferHashSet.has(hash)) {
+      // 1) tokenTransfersから検出
+      if (dexOutputTokens.length > 0) {
+        const receivedToken = dexOutputTokens[0];
+        const receivedAmount =
+          parseFloat(receivedToken.value) / Math.pow(10, parseInt(receivedToken.tokenDecimal));
+        entries.push({
+          取引所名: config.exchangeName,
+          "日時（JST）": formatJSTDate(timestamp),
+          取引種別: "売買",
+          "取引通貨名(+)": receivedToken.tokenSymbol,
+          "取引量(+)": receivedAmount,
+          "取引通貨名(-)": config.nativeToken,
+          "取引量(-)": ethOut,
+          取引額時価: "",
+          手数料通貨名: fee > 0 ? config.nativeToken : "",
+          手数料数量: fee > 0 ? fee : "",
+          取引詳細: `DEX swap ${config.nativeToken}→${receivedToken.tokenSymbol} (${hash.slice(0, 10)}...)`,
+        });
+        markProcessed(hash);
+        return;
+      }
+      // 2) receipt logsから検出（EtherscanのtokentxAPIに含まれないトークン用）
+      if (receiptDexOutputTokens.length > 0) {
+        const received = receiptDexOutputTokens[0];
+        entries.push({
+          取引所名: config.exchangeName,
+          "日時（JST）": formatJSTDate(timestamp),
+          取引種別: "売買",
+          "取引通貨名(+)": received.symbol,
+          "取引量(+)": received.amount,
+          "取引通貨名(-)": config.nativeToken,
+          "取引量(-)": ethOut,
+          取引額時価: "",
+          手数料通貨名: fee > 0 ? config.nativeToken : "",
+          手数料数量: fee > 0 ? fee : "",
+          取引詳細: `DEX swap ${config.nativeToken}→${received.symbol} (${hash.slice(0, 10)}...)`,
+        });
+        markProcessed(hash);
+        return;
+      }
+      // 3) Bridge+DEX: ブリッジ経由で別チェーンに最終トークンが送られる場合
+      if (bridgeDexOutput) {
+        entries.push({
+          取引所名: config.exchangeName,
+          "日時（JST）": formatJSTDate(timestamp),
+          取引種別: "売買",
+          "取引通貨名(+)": bridgeDexOutput.symbol,
+          "取引量(+)": bridgeDexOutput.amount,
+          "取引通貨名(-)": config.nativeToken,
+          "取引量(-)": ethOut,
+          取引額時価: "",
+          手数料通貨名: fee > 0 ? config.nativeToken : "",
+          手数料数量: fee > 0 ? fee : "",
+          取引詳細: `DEX+Bridge swap ${config.nativeToken}→${bridgeDexOutput.symbol} (${hash.slice(0, 10)}...)`,
+        });
+        markProcessed(hash);
+        return;
+      }
+    }
+
+    // Case B: ERC20トークン → 他のトークンの売却（例: SAND→WETH）
+    if (dexInputTokens.length > 0 && !nftTransferHashSet.has(hash)) {
+      // B-1: 受取がtokentx上のDEX出力トークン（Wrapped/Native以外）の場合
+      //      例: Polygon上 SAND→WETH（WETHはWrappedNativeTokenではない）
+      if (dexOutputTokens.length > 0) {
+        const sentToken = dexInputTokens[0];
+        const sentAmount =
+          parseFloat(sentToken.value) / Math.pow(10, parseInt(sentToken.tokenDecimal));
+        const receivedToken = dexOutputTokens[0];
+        const receivedAmount =
+          parseFloat(receivedToken.value) / Math.pow(10, parseInt(receivedToken.tokenDecimal));
+        entries.push({
+          取引所名: config.exchangeName,
+          "日時（JST）": formatJSTDate(timestamp),
+          取引種別: "売買",
+          "取引通貨名(+)": receivedToken.tokenSymbol,
+          "取引量(+)": receivedAmount,
+          "取引通貨名(-)": sentToken.tokenSymbol,
+          "取引量(-)": sentAmount,
+          取引額時価: "",
+          手数料通貨名: fee > 0 ? config.nativeToken : "",
+          手数料数量: fee > 0 ? fee : "",
+          取引詳細: `DEX swap ${sentToken.tokenSymbol}→${receivedToken.tokenSymbol} (${hash.slice(0, 10)}...)`,
+        });
+        markProcessed(hash);
+        return;
+      }
+      // B-2: ネイティブ/Wrappedトークンで受取
+      if (ethIn > 0 || wethIn > 0) {
+        const sentToken = dexInputTokens[0];
+        const sentAmount =
+          parseFloat(sentToken.value) / Math.pow(10, parseInt(sentToken.tokenDecimal));
+        const receivedAmount = ethIn > 0 ? ethIn : wethIn;
+        const receivedSymbol = ethIn > 0 ? config.nativeToken : config.wrappedNativeToken;
+        entries.push({
+          取引所名: config.exchangeName,
+          "日時（JST）": formatJSTDate(timestamp),
+          取引種別: "売買",
+          "取引通貨名(+)": receivedSymbol,
+          "取引量(+)": receivedAmount,
+          "取引通貨名(-)": sentToken.tokenSymbol,
+          "取引量(-)": sentAmount,
+          取引額時価: "",
+          手数料通貨名: fee > 0 ? config.nativeToken : "",
+          手数料数量: fee > 0 ? fee : "",
+          取引詳細: `DEX swap ${sentToken.tokenSymbol}→${receivedSymbol} (${hash.slice(0, 10)}...)`,
+        });
+        markProcessed(hash);
+        return;
+      }
+      // B-3: receipt logsから受取トークン検出（tokentxに含まれない場合）
+      if (receiptDexOutputTokens.length > 0) {
+        const sentToken = dexInputTokens[0];
+        const sentAmount =
+          parseFloat(sentToken.value) / Math.pow(10, parseInt(sentToken.tokenDecimal));
+        const received = receiptDexOutputTokens[0];
+        entries.push({
+          取引所名: config.exchangeName,
+          "日時（JST）": formatJSTDate(timestamp),
+          取引種別: "売買",
+          "取引通貨名(+)": received.symbol,
+          "取引量(+)": received.amount,
+          "取引通貨名(-)": sentToken.tokenSymbol,
+          "取引量(-)": sentAmount,
+          取引額時価: "",
+          手数料通貨名: fee > 0 ? config.nativeToken : "",
+          手数料数量: fee > 0 ? fee : "",
+          取引詳細: `DEX swap ${sentToken.tokenSymbol}→${received.symbol} (${hash.slice(0, 10)}...)`,
+        });
+        markProcessed(hash);
+        return;
+      }
+      // B-4: Bridge+DEX: ブリッジ経由で別チェーンに最終トークンが送られる場合
+      // ただし入力と出力が同一トークンの場合は単純送付なのでスキップ
+      if (bridgeDexOutput && bridgeDexOutput.symbol.toUpperCase() !== dexInputTokens[0].tokenSymbol.toUpperCase()) {
+        const sentToken = dexInputTokens[0];
+        const sentAmount =
+          parseFloat(sentToken.value) / Math.pow(10, parseInt(sentToken.tokenDecimal));
+        entries.push({
+          取引所名: config.exchangeName,
+          "日時（JST）": formatJSTDate(timestamp),
+          取引種別: "売買",
+          "取引通貨名(+)": bridgeDexOutput.symbol,
+          "取引量(+)": bridgeDexOutput.amount,
+          "取引通貨名(-)": sentToken.tokenSymbol,
+          "取引量(-)": sentAmount,
+          取引額時価: "",
+          手数料通貨名: fee > 0 ? config.nativeToken : "",
+          手数料数量: fee > 0 ? fee : "",
+          取引詳細: `DEX+Bridge swap ${sentToken.tokenSymbol}→${bridgeDexOutput.symbol} (${hash.slice(0, 10)}...)`,
+        });
+        markProcessed(hash);
+        return;
+      }
+    }
+
+    // DEX最終出力トークンが検出されている場合は、wrap/bridge処理にフォールバックしない
+    // （Case A/Bで処理されるべき取引がwrap扱いされるのを防止）
+    const hasDexFinalOutput = dexOutputTokens.length > 0 || receiptDexOutputTokens.length > 0 || bridgeDexOutput !== null;
+
     // MetaMask Bridge経由: 出たETHと同量のWETHが入る前提で売買扱い
     const isMetamaskBridgeTx = txs.some(
       (tx) =>
@@ -1032,6 +1453,7 @@ export function convertAllTransactions(
     if (
       isMetamaskBridgeTx &&
       !nftTransferHashSet.has(hash) &&
+      !hasDexFinalOutput &&
       ethOut > 0 &&
       wethIn === 0 &&
       wethOut === 0
@@ -1039,13 +1461,14 @@ export function convertAllTransactions(
       const effectiveEthOut =
         ethRefund > 0 && ethOut > ethRefund ? ethOut - ethRefund : ethOut;
       entries.push(
-        convertEthWethSwapToEntry(
+        convertNativeWrappedSwapToEntry(
           hash,
-          "ETH_TO_WETH",
+          "NATIVE_TO_WRAPPED",
           timestamp,
           effectiveEthOut,
           effectiveEthOut,
-          fee
+          fee,
+          config
         )
       );
       markProcessed(hash);
@@ -1057,6 +1480,7 @@ export function convertAllTransactions(
     // 受取WETHを (送信ETH - 返金ETH) とみなして売買扱いにする
     if (
       !nftTransferHashSet.has(hash) &&
+      !hasDexFinalOutput &&
       wethIn === 0 &&
       wethOut === 0 &&
       ethOut > 0 &&
@@ -1065,13 +1489,14 @@ export function convertAllTransactions(
     ) {
       const effectiveEthOut = ethOut - ethRefund;
       entries.push(
-        convertEthWethSwapToEntry(
+        convertNativeWrappedSwapToEntry(
           hash,
-          "ETH_TO_WETH",
+          "NATIVE_TO_WRAPPED",
           timestamp,
           effectiveEthOut,
           effectiveEthOut,
-          fee
+          fee,
+          config
         )
       );
       markProcessed(hash);
@@ -1081,44 +1506,47 @@ export function convertAllTransactions(
     // Bridge経由などでWETHのERC20受取が見えないケースを補完
     if (
       !nftTransferHashSet.has(hash) &&
+      !hasDexFinalOutput &&
       wethIn === 0 &&
       wethOut === 0 &&
       ethOut > 0 &&
       ethToWethContract > 0
     ) {
       entries.push(
-        convertEthWethSwapToEntry(
+        convertNativeWrappedSwapToEntry(
           hash,
-          "ETH_TO_WETH",
+          "NATIVE_TO_WRAPPED",
           timestamp,
           ethOut,
           ethToWethContract,
-          fee
+          fee,
+          config
         )
       );
       markProcessed(hash);
       return;
     }
 
-    // WETH deposit（ETH -> WETH）はtransferが欠けるケースがあるためmethodIdでも補完
+    // Wrapped deposit（native -> wrapped）はtransferが欠けるケースがあるためmethodIdでも補完
     const hasWrapCall = txs.some((tx) => {
       const to = (tx.to || "").toLowerCase();
       const method = (tx.methodId || "").toLowerCase();
       return (
-        to === WETH_CONTRACT_ADDRESS &&
+        to === WRAPPED_CONTRACT_ADDRESS &&
         (method === "0xd0e30db0" || weiToEth(tx.value) > 0)
       );
     });
-    if (hasWrapCall && ethOut > 0) {
+    if (hasWrapCall && ethOut > 0 && !hasDexFinalOutput) {
       const wethInOrEstimated = wethIn > 0 ? wethIn : ethOut;
       entries.push(
-        convertEthWethSwapToEntry(
+        convertNativeWrappedSwapToEntry(
           hash,
-          "ETH_TO_WETH",
+          "NATIVE_TO_WRAPPED",
           timestamp,
           ethOut,
           wethInOrEstimated,
-          fee
+          fee,
+          config
         )
       );
       markProcessed(hash);
@@ -1127,7 +1555,7 @@ export function convertAllTransactions(
 
     if (ethOut > 0 && wethIn > 0) {
       entries.push(
-        convertEthWethSwapToEntry(hash, "ETH_TO_WETH", timestamp, ethOut, wethIn, fee)
+        convertNativeWrappedSwapToEntry(hash, "NATIVE_TO_WRAPPED", timestamp, ethOut, wethIn, fee, config)
       );
       markProcessed(hash);
       return;
@@ -1135,10 +1563,129 @@ export function convertAllTransactions(
 
     if (wethOut > 0 && ethIn > 0) {
       entries.push(
-        convertEthWethSwapToEntry(hash, "WETH_TO_ETH", timestamp, ethIn, wethOut, fee)
+        convertNativeWrappedSwapToEntry(hash, "WRAPPED_TO_NATIVE", timestamp, ethIn, wethOut, fee, config)
       );
       markProcessed(hash);
     }
+  });
+
+  // DEX Token-to-Token swap検出（swap候補外のトークン間交換）
+  // 同一ハッシュで自分がトークンAを送出＋トークンBを受取している場合はDEXスワップ
+  tokenTransfersByHash.forEach((transfers, hash) => {
+    if (isProcessed(hash)) return;
+    if (nftTransferHashSet.has(hash)) return; // NFT売買は別処理
+
+    const outgoing = transfers.filter(
+      (t) => isOwnAddress(t.from, ownAddressSet) && !isSpamToken(t, userAddresses)
+    );
+    const incoming = transfers.filter(
+      (t) => isOwnAddress(t.to, ownAddressSet) && !isSpamToken(t, userAddresses)
+    );
+
+    if (outgoing.length === 0 || incoming.length === 0) return;
+
+    // Wrappedトークン同士の自己交換は除外（wrap/unwrap処理済み）
+    if (
+      outgoing.every((t) => t.tokenSymbol === config.wrappedNativeToken) &&
+      incoming.every((t) => t.tokenSymbol === config.wrappedNativeToken)
+    ) return;
+
+    // 同一トークンの送受信は除外
+    const sentToken = outgoing[0];
+    const receivedToken = incoming.find((t) => t.tokenSymbol !== sentToken.tokenSymbol) || incoming[0];
+    if (sentToken.tokenSymbol === receivedToken.tokenSymbol) return;
+
+    const sentAmount =
+      parseFloat(sentToken.value) / Math.pow(10, parseInt(sentToken.tokenDecimal));
+    const receivedAmount =
+      parseFloat(receivedToken.value) / Math.pow(10, parseInt(receivedToken.tokenDecimal));
+    const fee =
+      (parseFloat(sentToken.gasUsed) * parseFloat(sentToken.gasPrice)) / 1e18;
+
+    entries.push({
+      取引所名: config.exchangeName,
+      "日時（JST）": formatJSTDate(sentToken.timeStamp),
+      取引種別: "売買",
+      "取引通貨名(+)": receivedToken.tokenSymbol,
+      "取引量(+)": receivedAmount,
+      "取引通貨名(-)": sentToken.tokenSymbol,
+      "取引量(-)": sentAmount,
+      取引額時価: "",
+      手数料通貨名: fee > 0 ? config.nativeToken : "",
+      手数料数量: fee > 0 ? fee : "",
+      取引詳細: `DEX swap ${sentToken.tokenSymbol}→${receivedToken.tokenSymbol} (${hash.slice(0, 10)}...)`,
+    });
+    markProcessed(hash);
+  });
+
+  // Receipt-based DEX swap検出: tokentxに受取トークンが含まれないケース
+  // 自分がトークンを送出しているが、受取トークンがtokentxに無い場合、receipt logsで補完
+  tokenTransfersByHash.forEach((transfers, hash) => {
+    if (isProcessed(hash)) return;
+    if (nftTransferHashSet.has(hash)) return;
+
+    const outgoing = transfers.filter(
+      (t) => isOwnAddress(t.from, ownAddressSet) && !isSpamToken(t, userAddresses)
+    );
+    if (outgoing.length === 0) return;
+
+    // tokentxに受取トークンがある場合はtoken-to-token検出で処理済み
+    const incoming = transfers.filter(
+      (t) => isOwnAddress(t.to, ownAddressSet) && !isSpamToken(t, userAddresses)
+    );
+    if (incoming.length > 0) return;
+
+    // receipt logsから受取トークンを検出
+    const receipt = receiptsByHash?.[hash.toLowerCase()];
+    if (!receipt || !Array.isArray(receipt.logs)) return;
+
+    const receivedFromReceipt: Array<{ symbol: string; amount: number }> = [];
+    receipt.logs.forEach((log: any) => {
+      const address = (log.address || "").toLowerCase();
+      const topics: string[] = log.topics || [];
+      if (address === WRAPPED_CONTRACT_ADDRESS) return;
+      if (
+        topics.length >= 3 &&
+        (topics[0] || "").toLowerCase() === ERC20_TRANSFER_TOPIC.toLowerCase()
+      ) {
+        const to = hexToAddress(topics[2]);
+        if (isOwnAddress(to, ownAddressSet)) {
+          const tokenInfo = tokenInfoByAddress.get(address);
+          if (tokenInfo) {
+            const rawAmount = BigInt(log.data || "0x0");
+            const amount = Number(rawAmount) / Math.pow(10, tokenInfo.decimals);
+            if (amount > 0) {
+              receivedFromReceipt.push({ symbol: tokenInfo.symbol, amount });
+            }
+          }
+        }
+      }
+    });
+
+    if (receivedFromReceipt.length === 0) return;
+
+    const sentToken = outgoing[0];
+    if (!isInYear(sentToken.timeStamp)) return;
+    const sentAmount =
+      parseFloat(sentToken.value) / Math.pow(10, parseInt(sentToken.tokenDecimal));
+    const received = receivedFromReceipt[0];
+    const fee =
+      (parseFloat(sentToken.gasUsed) * parseFloat(sentToken.gasPrice)) / 1e18;
+
+    entries.push({
+      取引所名: config.exchangeName,
+      "日時（JST）": formatJSTDate(sentToken.timeStamp),
+      取引種別: "売買",
+      "取引通貨名(+)": received.symbol,
+      "取引量(+)": received.amount,
+      "取引通貨名(-)": sentToken.tokenSymbol,
+      "取引量(-)": sentAmount,
+      取引額時価: "",
+      手数料通貨名: fee > 0 ? config.nativeToken : "",
+      手数料数量: fee > 0 ? fee : "",
+      取引詳細: `DEX swap ${sentToken.tokenSymbol}→${received.symbol} (${hash.slice(0, 10)}...)`,
+    });
+    markProcessed(hash);
   });
 
   // 通常トランザクション
@@ -1200,7 +1747,7 @@ export function convertAllTransactions(
           allHashNftTransfers.forEach((nft) => {
             const nftName = `${nft.tokenName || "NFT"}#${nft.tokenID}`;
             entries.push({
-              取引所名: "metamask",
+              取引所名: config.exchangeName,
               "日時（JST）": formatJSTDate(tx.timeStamp),
               取引種別: "減少",
               "取引通貨名(+)": "",
@@ -1208,7 +1755,7 @@ export function convertAllTransactions(
               "取引通貨名(-)": `NFT資産${nftName}`,
               "取引量(-)": parseFloat(nft.tokenValue || "1"),
               取引額時価: "",
-              手数料通貨名: "ETH",
+              手数料通貨名: config.nativeToken,
               手数料数量: fee / allHashNftTransfers.length, // ガス代を均等分割
               取引詳細: ruleResult.reason || "",
             });
@@ -1216,7 +1763,7 @@ export function convertAllTransactions(
         } else {
           // その他のルール（手数料等）
           entries.push({
-            取引所名: "metamask",
+            取引所名: config.exchangeName,
             "日時（JST）": formatJSTDate(tx.timeStamp),
             取引種別: ruleResult.type,
             "取引通貨名(+)": "",
@@ -1224,7 +1771,7 @@ export function convertAllTransactions(
             "取引通貨名(-)": "",
             "取引量(-)": "",
             取引額時価: "",
-            手数料通貨名: "ETH",
+            手数料通貨名: config.nativeToken,
             手数料数量: fee,
             取引詳細: ruleResult.reason || "",
           });
@@ -1257,7 +1804,7 @@ export function convertAllTransactions(
 
           // Transfer event
           if (
-            address === WETH_CONTRACT_ADDRESS &&
+            address === WRAPPED_CONTRACT_ADDRESS &&
             topics.length >= 3 &&
             (topics[0] || "").toLowerCase() === ERC20_TRANSFER_TOPIC.toLowerCase()
           ) {
@@ -1274,7 +1821,7 @@ export function convertAllTransactions(
           const address = (log.address || "").toLowerCase();
           const topics: string[] = log.topics || [];
           if (
-            address === WETH_CONTRACT_ADDRESS &&
+            address === WRAPPED_CONTRACT_ADDRESS &&
             topics.length >= 1 &&
             (topics[0] || "").toLowerCase() === WETH_DEPOSIT_TOPIC.toLowerCase()
           ) {
@@ -1284,29 +1831,108 @@ export function convertAllTransactions(
         });
       }
 
-      // WETH Deposit event検出による売買判定（最優先）
-      if (
-        isOutgoing &&
-        txValue > 0 &&
-        !hasNftOnHash &&
-        hasWethDepositInReceipt &&
-        wethDepositAmountInReceipt > 0
-      ) {
-        const fee = (parseFloat(tx.gasUsed) * parseFloat(tx.gasPrice)) / 1e18;
-        // 返金を考慮して実質的な交換量を計算（deposit量と一致させる）
-        const effectiveEthAmount = wethDepositAmountInReceipt;
-        entries.push(
-          convertEthWethSwapToEntry(
-            txHash,
-            "ETH_TO_WETH",
-            tx.timeStamp,
-            effectiveEthAmount,
-            wethDepositAmountInReceipt,
-            fee
-          )
-        );
-        markProcessed(txHash);
-        return;
+      // WETH Deposit event検出による売買判定
+      // ただし、receipt logsにWrappedNativeToken以外の最終出力トークンがある場合は
+      // DEXスワップの中間ステップとしてのwrapなので、ここではスキップ
+      {
+        const txReceiptDexOutput: Array<{ symbol: string; amount: number }> = [];
+        let txBridgeDexOutput: { symbol: string; amount: number } | null = null;
+        if (receipt && Array.isArray(receipt.logs)) {
+          let lastBridgeSymbol = "";
+          let lastBridgeAmount = 0;
+          receipt.logs.forEach((log: any) => {
+            const addr = (log.address || "").toLowerCase();
+            const topics: string[] = log.topics || [];
+            if (addr === WRAPPED_CONTRACT_ADDRESS) return;
+            if (
+              topics.length >= 3 &&
+              (topics[0] || "").toLowerCase() === ERC20_TRANSFER_TOPIC.toLowerCase()
+            ) {
+              const to = hexToAddress(topics[2]);
+              const tokenInfo = tokenInfoByAddress.get(addr);
+              if (!tokenInfo) return;
+              const rawAmount = BigInt(log.data || "0x0");
+              const amount = Number(rawAmount) / Math.pow(10, tokenInfo.decimals);
+              if (amount <= 0) return;
+
+              if (isOwnAddress(to, ownAddressSet)) {
+                txReceiptDexOutput.push({ symbol: tokenInfo.symbol, amount });
+              } else {
+                lastBridgeSymbol = tokenInfo.symbol;
+                lastBridgeAmount = amount;
+              }
+            }
+          });
+          if (lastBridgeSymbol && lastBridgeAmount > 0 && txReceiptDexOutput.length === 0) {
+            txBridgeDexOutput = { symbol: lastBridgeSymbol, amount: lastBridgeAmount };
+          }
+        }
+
+        if (txReceiptDexOutput.length > 0 && isOutgoing && txValue > 0 && !hasNftOnHash) {
+          // DEXスワップ: ネイティブトークン→最終出力トークン（wrapは中間ステップ）
+          const received = txReceiptDexOutput[0];
+          const fee = (parseFloat(tx.gasUsed) * parseFloat(tx.gasPrice)) / 1e18;
+          entries.push({
+            取引所名: config.exchangeName,
+            "日時（JST）": formatJSTDate(tx.timeStamp),
+            取引種別: "売買",
+            "取引通貨名(+)": received.symbol,
+            "取引量(+)": received.amount,
+            "取引通貨名(-)": config.nativeToken,
+            "取引量(-)": txValue,
+            取引額時価: "",
+            手数料通貨名: fee > 0 ? config.nativeToken : "",
+            手数料数量: fee > 0 ? fee : "",
+            取引詳細: `DEX swap ${config.nativeToken}→${received.symbol} (${txHash.slice(0, 10)}...)`,
+          });
+          markProcessed(txHash);
+          return;
+        }
+
+        // Bridge+DEX: ネイティブトークン→ブリッジ経由で別チェーンにトークン送付
+        if (txBridgeDexOutput && isOutgoing && txValue > 0 && !hasNftOnHash) {
+          const fee = (parseFloat(tx.gasUsed) * parseFloat(tx.gasPrice)) / 1e18;
+          entries.push({
+            取引所名: config.exchangeName,
+            "日時（JST）": formatJSTDate(tx.timeStamp),
+            取引種別: "売買",
+            "取引通貨名(+)": txBridgeDexOutput.symbol,
+            "取引量(+)": txBridgeDexOutput.amount,
+            "取引通貨名(-)": config.nativeToken,
+            "取引量(-)": txValue,
+            取引額時価: "",
+            手数料通貨名: fee > 0 ? config.nativeToken : "",
+            手数料数量: fee > 0 ? fee : "",
+            取引詳細: `DEX+Bridge swap ${config.nativeToken}→${txBridgeDexOutput.symbol} (${txHash.slice(0, 10)}...)`,
+          });
+          markProcessed(txHash);
+          return;
+        }
+
+        if (
+          isOutgoing &&
+          txValue > 0 &&
+          !hasNftOnHash &&
+          hasWethDepositInReceipt &&
+          wethDepositAmountInReceipt > 0
+        ) {
+          const fee = (parseFloat(tx.gasUsed) * parseFloat(tx.gasPrice)) / 1e18;
+          // 返金を考慮して実質的な交換量を計算（deposit量と一致させる）
+          const effectiveEthAmount = wethDepositAmountInReceipt;
+          entries.push(
+            convertNativeWrappedSwapToEntry(
+              txHash,
+              "NATIVE_TO_WRAPPED",
+              tx.timeStamp,
+              effectiveEthAmount,
+              wethDepositAmountInReceipt,
+              fee,
+              config
+            )
+          );
+          markProcessed(txHash);
+          return;
+        }
       }
 
       // Bridge経由フォールバック（通常TX側で直接判定）
@@ -1327,20 +1953,34 @@ export function convertAllTransactions(
         const fee =
           (parseFloat(tx.gasUsed) * parseFloat(tx.gasPrice)) / 1e18;
         entries.push(
-          convertEthWethSwapToEntry(
+          convertNativeWrappedSwapToEntry(
             txHash,
-            "ETH_TO_WETH",
+            "NATIVE_TO_WRAPPED",
             tx.timeStamp,
             txValue,
             txValue - ethRefund,
-            fee
+            fee,
+            config
           )
         );
         markProcessed(txHash);
         return;
       }
 
-      const entry = convertTransactionToEntry(tx, userAddresses);
+      // value=0の手数料のみTXで、同一hashにトークン送出がある場合は
+      // DEXスワップの一部（approve/swap call）の可能性が高いためスキップ
+      // （tokenTransfer側でDEXスワップとして処理させる）
+      if (txValue === 0) {
+        const hashHasTokenOut = tokenTransfers.some(
+          (t) => t.hash === txHash && isOwnAddress(t.from, ownAddressSet) && !isSpamToken(t, userAddresses)
+        );
+        if (hashHasTokenOut) {
+          // DEXスワップの手数料はtokenTransfer側で計上されるためスキップ
+          return;
+        }
+      }
+
+      const entry = convertTransactionToEntry(tx, userAddresses, config);
       if (entry) {
         entries.push(entry);
       }
@@ -1348,10 +1988,14 @@ export function convertAllTransactions(
   });
 
   // トークン転送（NFT売買以外）
+  // ボーナス判定: 自分がTXを発信していない受取はボーナス（エアドロップ/報酬）
   tokenTransfers.forEach((transfer) => {
     if (isInYear(transfer.timeStamp) && !isProcessed(transfer.hash)) {
-      const entry = convertTokenTransferToEntry(transfer, userAddresses);
+      const entry = convertTokenTransferToEntry(transfer, userAddresses, config);
       if (entry) {
+        if (entry.取引種別 === "受取" && !ownInitiatedTxHashes.has(transfer.hash)) {
+          entry.取引種別 = "ボーナス";
+        }
         entries.push(entry);
       }
     }
@@ -1364,8 +2008,11 @@ export function convertAllTransactions(
       !isProcessed(transfer.hash) &&
       !isSpamNFT(transfer, userAddresses)
     ) {
-      const entry = convertNFTTransferToEntry(transfer, userAddresses);
+      const entry = convertNFTTransferToEntry(transfer, userAddresses, config);
       if (entry) {
+        if (entry.取引種別 === "受取" && !ownInitiatedTxHashes.has(transfer.hash)) {
+          entry.取引種別 = "ボーナス";
+        }
         entries.push(entry);
       }
     }
@@ -1378,8 +2025,11 @@ export function convertAllTransactions(
       !isProcessed(transfer.hash) &&
       !isSpamNFT(transfer, userAddresses)
     ) {
-      const entry = convertNFTTransferToEntry(transfer, userAddresses);
+      const entry = convertNFTTransferToEntry(transfer, userAddresses, config);
       if (entry) {
+        if (entry.取引種別 === "受取" && !ownInitiatedTxHashes.has(transfer.hash)) {
+          entry.取引種別 = "ボーナス";
+        }
         entries.push(entry);
       }
     }
