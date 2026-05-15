@@ -878,6 +878,56 @@ function convertNFTTradeToEntry(
   }
 }
 
+/**
+ * 同一トークンの「受取」と「送付」が短時間内に発生していたら、
+ * 自己ウォレット間やステーキング等の内部移動とみなして両方とも「手数料」に変更する。
+ *
+ * - 金額表示はそのまま残す（手作業版のスタイル踏襲）
+ * - ネイティブ通貨と Wrapped ネイティブは対象外（既存ロジックでカバー済み）
+ * - 「ボーナス」は対象外（純粋な報酬受取と区別するため）
+ * - 金額の一致は要求しない（手数料・差分の発生を許容）
+ */
+function groupSelfTokenMovementPairs(
+  entries: AccountingEntry[],
+  options: { windowMinutes?: number; excludeSymbols?: Set<string> } = {}
+): void {
+  const windowMs = (options.windowMinutes ?? 30) * 60 * 1000;
+  const excludeSymbols =
+    options.excludeSymbols ??
+    new Set<string>(["ETH", "POL", "MATIC", "WETH", "WMATIC"]);
+
+  const parseTime = (s: string): number => new Date(s).getTime();
+  const used = new Set<number>();
+
+  for (let i = 0; i < entries.length; i++) {
+    if (used.has(i)) continue;
+    const e1 = entries[i];
+    if (e1.取引種別 !== "受取") continue;
+    const sym = (e1["取引通貨名(+)"] || "").toString();
+    if (!sym || excludeSymbols.has(sym)) continue;
+    const t1 = parseTime(e1["日時（JST）"]);
+
+    for (let j = 0; j < entries.length; j++) {
+      if (j === i || used.has(j)) continue;
+      const e2 = entries[j];
+      if (e2.取引種別 !== "送付") continue;
+      const sym2 = (e2["取引通貨名(-)"] || "").toString();
+      if (sym2 !== sym) continue;
+      const t2 = parseTime(e2["日時（JST）"]);
+      if (Math.abs(t2 - t1) > windowMs) continue;
+
+      e1.取引種別 = "手数料";
+      e2.取引種別 = "手数料";
+      const note = "(内部移動の可能性)";
+      e1.取引詳細 = (e1.取引詳細 ? e1.取引詳細 + " " : "") + note;
+      e2.取引詳細 = (e2.取引詳細 ? e2.取引詳細 + " " : "") + note;
+      used.add(i);
+      used.add(j);
+      break;
+    }
+  }
+}
+
 function convertNativeWrappedSwapToEntry(
   hash: string,
   direction: "NATIVE_TO_WRAPPED" | "WRAPPED_TO_NATIVE",
@@ -1001,6 +1051,22 @@ export function convertAllTransactions(
   transactions.forEach((tx) => {
     if (isOwnAddress(tx.from, ownAddressSet)) {
       ownInitiatedTxHashes.add(tx.hash);
+    }
+  });
+
+  // 自分がそのTXで支払い（ETH送付 or ERC20送付）を行ったハッシュセット
+  // 無料mint判定（自分発信NFT受取で支払いなし → ボーナス）に使用
+  const ownPaymentTxHashes = new Set<string>();
+  transactions.forEach((tx) => {
+    if (isOwnAddress(tx.from, ownAddressSet) && weiToEth(tx.value) > 0) {
+      ownPaymentTxHashes.add(tx.hash);
+    }
+  });
+  tokenTransfers.forEach((transfer) => {
+    const value = parseFloat(transfer.value || "0");
+    if (value <= 0) return;
+    if (isOwnAddress(transfer.from, ownAddressSet)) {
+      ownPaymentTxHashes.add(transfer.hash);
     }
   });
 
@@ -2001,6 +2067,16 @@ export function convertAllTransactions(
     }
   });
 
+  // NFT受取をボーナスに分類する判定:
+  // - 他人発信 → ボーナス（エアドロップ/Giveaway）
+  // - 自分発信だが同TXで支払い（ETH/ERC20送出）なし → ボーナス（無料mint）
+  // - 自分発信＋支払いあり → 「受取」のまま（売買検出漏れの可能性、要確認）
+  const isNftBonusReceipt = (hash: string): boolean => {
+    const ownInitiated = ownInitiatedTxHashes.has(hash);
+    const ownPayment = ownPaymentTxHashes.has(hash);
+    return !(ownInitiated && ownPayment);
+  };
+
   // NFT転送（NFT売買以外）
   nftTransfers.forEach((transfer) => {
     if (
@@ -2010,7 +2086,7 @@ export function convertAllTransactions(
     ) {
       const entry = convertNFTTransferToEntry(transfer, userAddresses, config);
       if (entry) {
-        if (entry.取引種別 === "受取" && !ownInitiatedTxHashes.has(transfer.hash)) {
+        if (entry.取引種別 === "受取" && isNftBonusReceipt(transfer.hash)) {
           entry.取引種別 = "ボーナス";
         }
         entries.push(entry);
@@ -2027,7 +2103,7 @@ export function convertAllTransactions(
     ) {
       const entry = convertNFTTransferToEntry(transfer, userAddresses, config);
       if (entry) {
-        if (entry.取引種別 === "受取" && !ownInitiatedTxHashes.has(transfer.hash)) {
+        if (entry.取引種別 === "受取" && isNftBonusReceipt(transfer.hash)) {
           entry.取引種別 = "ボーナス";
         }
         entries.push(entry);
@@ -2039,6 +2115,9 @@ export function convertAllTransactions(
   entries.sort((a, b) => {
     return new Date(a["日時（JST）"]).getTime() - new Date(b["日時（JST）"]).getTime();
   });
+
+  // 同一トークンの「受取↔送付」短時間ペアを内部移動として「手数料」に統合
+  groupSelfTokenMovementPairs(entries);
 
   return entries;
 }
