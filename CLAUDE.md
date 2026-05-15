@@ -20,9 +20,86 @@
 7. 確定申告用Excel形式での出力（全チェーン統合・タイムスタンプソート）
 
 ### 現在のブランチ
-- `feature/polygon-support` — Polygon対応の開発ブランチ（mainへ未マージ）
+- `main` — Polygon対応・分類改善すべて統合済み（2026-05-15 origin/main に push 済み）
+- `feature/polygon-support` — マージ済み（残置）
+- `feature/classification-refinements` — マージ済み（残置）
 
-## 最新作業記録（2026-05-14）Polygon対応・DEXスワップ・ボーナス自動分類
+## 最新作業記録（2026-05-15）FNCT手数料グループ化・10YETH無料mintボーナス化・main統合
+
+### 作業概要
+前回(2026-05-14)で実装した Polygon 対応(v8)を main にマージし、中優先度の分類改善2点を実装。
+v10 出力で動作確認、ETH/POL ともに悪影響なしを確認の上で main に統合 → push。
+
+### 完了した作業
+
+#### 1. リポジトリ整理（高優先度）
+- `feature/polygon-support` を `--no-ff` で main にマージ（CLAUDE.md コンフリクトは feature 側採用）
+- `origin/main` に push（4コミット先行 → 同期）
+- デバッグ・検証スクリプト(`debug-*.js`, `verify-*.js`, `compare-*.js`)を `.gitignore` 化（ローカル保持）
+
+#### 2. 同一トークン短時間ペアの内部移動判定（中優先度）
+- 新規関数 `groupSelfTokenMovementPairs` (`lib/transaction-converter.ts`)
+- 同一トークンが「受取↔送付」を30分以内に発生したら両方を「手数料」に変更
+- 金額表示は残す（手作業版スタイル準拠）、取引詳細に `(内部移動の可能性)` を追加
+- 対象外: ネイティブ通貨(ETH/POL/MATIC/WETH/WMATIC)、ボーナス分類
+- 効果: FNCT 7/28 16:29受取/16:31送付ペア(625/640)が両方「手数料」化 → 手作業版POLと一致
+
+#### 3. NFT無料mintのボーナス判定（中優先度）
+- `ownPaymentTxHashes` セットを追加（tx.value>0 or ERC20送出ありの自分発信TXハッシュ）
+- `isNftBonusReceipt(hash)` = `!(ownInitiated && ownPayment)`
+- NFT受取エントリで以下に該当すれば「ボーナス」化:
+  - 他人発信（既存）
+  - 自分発信＋同TXで支払いなし（新規・無料mint）
+- groupNFTTrades 経由（paymentValue=0 で受取になるケース）にも適用
+  - 当初は通常NFT loop のみ対応 → 10YETH が変わらず → trade ループにも適用する修正(`f80ac6b`)
+- 効果: 10YETH (Ten Years Of Ethereum) 等の無料mintが「受取」→「ボーナス」に正しく分類
+
+### 出力結果（v10）
+
+| 項目 | v8 | v10 | 差分 |
+|---|---|---|---|
+| 合計 | 68行 | 68行 | ±0 |
+| ETH | 37行 | 37行 | 受取-1/ボーナス+1（10YETH のみ移動） |
+| POL | 31行 | 31行 | 受取-1/送付-1/手数料+2（FNCT ペアのみ移動） |
+| 手作業POL(28行)との差分 | 3行 | 3行 | 変化なし（残3行は低優先度・実害なし） |
+
+### コミット履歴
+
+```
+22e7752 Merge 'feature/classification-refinements' (main)
+├── f80ac6b fix: NFT trade経由でも無料mintをボーナス判定
+└── 9dda611 feat: 同一トークン短時間ペアの内部移動判定とNFT無料mintのボーナス判定
+77ee89b Merge 'feature/polygon-support'
+├── c281c44 feat: Polygon対応・DEXスワップ検出・ボーナス自動分類
+└── 11bb01c docs: Polygon対応の次回作業予定
+```
+
+### 次回作業時の残タスク（低優先度のみ）
+
+- [ ] **JPYC/USDC 余分行の除外判断**（手作業版POLとの差分3行、実害なし）
+  - 行52: USDC 5.058 送付（スワップ後の送付）
+  - 行62: JPYC 3000 ボーナス（手作業版の記載漏れの可能性）
+- [ ] **ETH側「受取」2件のボーナス判定**
+  - 2025-08-01 09:56 ETH 0.24826
+  - 2025-12-30 20:56 ETH 0.0584413
+  - 判断保留が適切な可能性あり（オンチェーン情報だけで判別困難）
+- [ ] FNCT手数料グループ化のwindow調整（現状30分、必要なら設定化）
+- [ ] BSC等の他チェーン対応（`参考/確定申告2025BNB.xlsx` あり）
+
+### 検証手順（次回再現用）
+
+1. dev サーバー起動（別ターミナル）: `npm run dev`
+2. ブラウザ http://localhost:3000
+3. ウォレット入力:
+   - メイン: `0x01b27ec780c534ba0fab15509354c3798321273c`
+   - サブ: `0x581087E117A68537b624e0352833dB96654c0481`
+4. 対象年: 2025、ETH + Polygon 両方
+5. Excel ダウンロード → `自動生成_ETHPOL/確定申告{year}仮想通貨_N.xlsx` 形式で保存
+6. ロジック単体検証: `node verify-self-movement.js`（ローカル保持・10ケース）
+
+---
+
+## 過去の作業記録（2026-05-14）Polygon対応・DEXスワップ・ボーナス自動分類
 
 ### 作業概要
 約3ヶ月ぶりに再開。`feature/polygon-support`ブランチでPolygon対応を実装中。
@@ -802,7 +879,9 @@ NEXT_PUBLIC_ETHERSCAN_API_KEY=your-api-key-here
 
 ## 今後の改善案
 
-- [x] Polygon対応（feature/polygon-supportブランチで実装済み・mainマージ待ち）
+- [x] Polygon対応（2026-05-15 main統合完了・origin push済み）
+- [x] FNCT手数料グループ化（同一トークン短時間ペア検出として汎用実装、2026-05-15）
+- [x] 10YETH NFTのボーナス判定改善（無料mint対応、2026-05-15）
 - [ ] 他のブロックチェーン対応（BSC、Arbitrum等）
 - [ ] 複数年度のバッチ処理
 - [ ] 取引履歴のローカル保存・再利用（APIリクエスト削減）
@@ -830,8 +909,8 @@ NEXT_PUBLIC_ETHERSCAN_API_KEY=your-api-key-here
 
 ---
 
-**最終更新**: 2026-05-14
-**ステータス**: Polygon対応実装中（feature/polygon-support）、v8出力まで検証済み
+**最終更新**: 2026-05-15
+**ステータス**: Polygon対応・分類改善すべて main 統合済み（origin/main push 済み）、v10出力で動作確認済み
 
 ## テスト用ウォレットアドレス
 
