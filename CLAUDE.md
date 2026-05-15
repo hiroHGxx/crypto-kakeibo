@@ -20,15 +20,110 @@
 7. 確定申告用Excel形式での出力（全チェーン統合・タイムスタンプソート）
 
 ### 現在のブランチ
-- `main` — Polygon対応・分類改善すべて統合済み（2026-05-15 origin/main に push 済み）
-- `feature/bsc-support` — **作業中（未コミット）** BSC対応＋Excelインポート統合機能 (2026-05-16)
+- `main` — Polygon対応・分類改善・BSC手動Excelインポート統合まで全て統合済み
+- `feature/bsc-csv-import` — **作業中** BSC BscScan CSV自動取り込み＋CLIスクリプト化（2026-05-16 第3セッション）
+- `feature/bsc-support` — マージ済み（残置）
 - `feature/polygon-support` — マージ済み（残置）
 - `feature/classification-refinements` — マージ済み（残置）
 
-## 最新作業記録（2026-05-16）BSC対応 → Excelインポート方式に方針転換【中断中】
+## 最新作業記録（2026-05-16 第3セッション）BSC CSV自動取り込み + CLIスクリプト化【完了】
 
 ### 作業概要
-BSC対応に着手。Etherscan v2無料プランがBSC非対応と判明し、方針を「Excel手動入力データのインポート統合」に変更。コードは完成・ビルドOKだが動作確認前に中断。
+BscScan からダウンロードした4種CSV（Normal/Internal/BEP-20/NFT）を自動取り込みして既存パイプラインに合流させる仕組みを実装。さらに dev server 起動不要の CLIスクリプト `npm run export` を新設してワークフローを大幅効率化。
+
+### 実装したファイル
+- **新規** `lib/bscscan-csv-importer.ts` — BscScan CSV → Etherscan v2互換JSON変換器
+  - fee復元: `gasPrice=1, gasUsed=fee*1e18` の工夫で既存計算式 `gasUsed*gasPrice/1e18` をそのまま使える
+  - 4種CSVを txハッシュベースでマージ
+  - 年フィルタ対応
+- **新規** `lib/export-pipeline.ts` — エクスポート処理の共通関数 `buildExportEntries`
+  - API route と CLI 両方から呼び出す共通ロジック化（DRY確保）
+- **新規** `scripts/export-tax.ts` — CLI スクリプト
+  - `npm run export -- --year 2025` 1コマンドで Excel 生成
+  - `--addresses`/`--import-excel`/`--bsc-csv-dir`/`--out` オプション対応
+  - 出力ファイル番号は自動採番
+- **拡張** `app/api/export/route.ts` — pipeline 利用版にリファクタ（130行 → 80行）
+- **微修正** `app/page.tsx` — タイトル「ETH + Polygon + BSC」に変更
+- **依存追加** `tsx`, `dotenv` (devDependencies)
+
+### 動作確認結果（v13）
+
+| 項目 | 期待 | 実測 | 判定 |
+|---|---|---|---|
+| ETH | 37 | 37 | ✅ |
+| POL | 31 | 31 | ✅ |
+| BSC (CSV) | — | **76** | ✅ |
+| 合計 | — | **144行** | ✅ |
+| タイムスタンプ昇順 | 0 reversals | 0 reversals | ✅ |
+| API版(v12) vs CLI版(v13) | 完全一致 | 完全一致 | ✅ |
+
+- 出力ファイル: `自動生成_ETHPOL/確定申告2025仮想通貨_13.xlsx`
+- BSC: 通常TX 54件、Internal 8件、Token 99件、NFT-721 5件、NFT-1155 2件 → 76エントリ生成
+
+### 参考BNB(50行・手作業)との照合
+- **取りこぼし0件**: 手作業の34分単位TXは全て自動側にも検出
+- **新規検出+17分単位**: 手作業見落とし or 分類解釈違いのもの
+- 主な解釈違い（要確認列でフラグ済み）:
+  - Aave Supply: 手作業「減少」 vs 自動「売買」(USDT→aBnbUSDT)
+  - PancakeSwap LP NFT: 手作業「減少+ボーナス」 vs 自動「売買」(NFT trade)
+  - スパム系: BEP-20 TOKEN*, WBNB 1e-7 等
+
+### CLIスクリプト使い方
+
+```bash
+npm run export                                      # 当年・既定ウォレット
+npm run export -- --year 2025                       # 年指定
+npm run export -- --year 2025 --addresses 0xa,0xb   # ウォレット指定
+npm run export -- --import-excel 参考/foo.xlsx      # 手作業Excelマージ
+npm run export -- --out ./custom-name.xlsx          # 出力ファイル指定
+npm run export -- --bsc-csv-dir ./other-csvs        # BSC CSVディレクトリ変更
+```
+
+### 既知の制約
+- CSVには receipt logs が含まれないため、WBNB wrap/unwrap や DEX log解析依存の判定は機能しない（既存Bridge+DEX検出等はETH/POLのみ有効）
+- BSC CSV ディレクトリは既定 `./BSC取引データ` を参照、`*.csv` は `.gitignore` で除外済み（個人データ保護）
+- BSC CSVは35/76件に `要確認` フラグ立ち → Excel上で手動再分類想定
+
+### 運用方針の変更
+- **従来**: 別ターミナルで `npm run dev` 起動 → ブラウザでUI操作
+- **新**: `npm run export` 一発で完結（dev server 不要・最速・CLAUDE.md準拠）
+- ブラウザUIは引き続き利用可能（カスタムアドレスのアドホック操作向け）
+
+---
+
+## 過去の作業記録（2026-05-16 後半セッション）BSC手動Excelインポート【完了・main統合済み】
+
+### 作業概要
+前半セッションで未コミット状態だったBSC手動Excelインポート機能の動作確認を実施 → 想定通り動作 → main にマージ・push まで完了。
+さらに次のステップとして「BscScan CSV手動ダウンロード方式」の方向性を決定（実CSV取得待ちで中断）。
+
+### 動作確認結果（v11）
+
+| 項目 | 期待値 | 実測値 | 判定 |
+|---|---|---|---|
+| 総行数 | 118 | **118** | ✅ |
+| ETH | 37 | 37 | ✅ |
+| POL | 31 | 31 | ✅ |
+| BSC(手動Excel) | 50 | 50 | ✅ |
+| 時刻ソート | 昇順 | 逆転0件 | ✅ |
+
+- 出力ファイル: `自動生成_ETHPOL/確定申告2025仮想通貨_11.xlsx`
+- BSCインポート行は `取引詳細="手動入力（BNB等のExcelインポート）"` で全件識別可能
+- 3チェーンがタイムスタンプ順に正しく混在配置
+
+### コミット履歴
+
+```
+b0604ac Merge branch 'feature/bsc-support'           ← main HEAD
+e77c83e docs: BSCインポート方式の実装記録（2026-05-16）
+2448cd1 feat: BSC等を手動Excelインポートで統合する仕組みを追加
+d7a2815 docs: セッション記録 2026-05-15（FNCT/10YETH 改善とmain統合）
+```
+
+## 過去の作業記録（2026-05-16 前半セッション）BSC対応 → Excelインポート方式に方針転換
+
+### 作業概要
+BSC対応に着手。Etherscan v2無料プランがBSC非対応と判明し、方針を「Excel手動入力データのインポート統合」に変更。コードは完成・ビルドOKだが動作確認前に中断（→ 後半セッションで完了）。
 
 ### 経緯と判明事項
 
@@ -921,11 +1016,16 @@ Crypto-kakeibo/
 │   ├── layout.tsx
 │   └── globals.css
 ├── lib/
-│   ├── chain-config.ts             # マルチチェーン設定（ETH/POL）、イベントトピック定数
+│   ├── chain-config.ts             # マルチチェーン設定（ETH/POL/BSC）、イベントトピック定数
 │   ├── etherscan.ts                # Etherscan v2 APIクライアント（chainid対応）
 │   ├── transaction-converter.ts    # 取引データ→会計エントリ変換（~2000行、中核ロジック）
 │   ├── classification-rules.ts     # 取引分類ルールモジュール（拡張可能設計）
+│   ├── excel-importer.ts           # 手作業Excel → AccountingEntry 変換
+│   ├── bscscan-csv-importer.ts     # BscScan CSV → Etherscan v2互換JSON 変換（BSC専用）
+│   ├── export-pipeline.ts          # エクスポート共通関数（API/CLI両方から使用）
 │   └── excel-generator.ts          # Excel生成ロジック
+├── scripts/
+│   └── export-tax.ts               # CLIスクリプト（npm run export）
 ├── types/
 │   └── index.ts                    # TypeScript型定義
 ├── 参考/
@@ -934,8 +1034,8 @@ Crypto-kakeibo/
 ├── 自動生成_ETH/
 │   └── 確定申告2025ETH_20.xlsx     # ETH自動生成最終版（37行）
 ├── 自動生成_ETHPOL/
-│   ├── 確定申告2025仮想通貨_7.xlsx # v7（DEX+NFT売却対応版）
-│   └── 確定申告2025仮想通貨_8.xlsx # v8（ボーナス自動分類版）★最新
+│   └── 確定申告2025仮想通貨_13.xlsx # v13（ETH+POL+BSC CSV統合・144行）★最新
+├── BSC取引データ/                  # BscScan CSV配置先（.gitignore で *.csv 除外）
 ├── 参考ドキュメント/
 │   └── キタドロ.md                 # Gtax共通フォーマット・確定申告ノウハウ
 ├── package.json
@@ -951,21 +1051,25 @@ Crypto-kakeibo/
    - 自動生成版のタイムスタンプは正しいJST時刻
    - 手作業版はUTC時刻なので参考程度に
 
-2. **開発サーバー起動**
+2. **推奨ワークフロー: CLIスクリプト**（dev server不要）
+   ```bash
+   npm run export -- --year 2025
+   ```
+   → `自動生成_ETHPOL/確定申告{year}仮想通貨_{N}.xlsx` を自動採番で出力
+
+3. **BSC CSV 更新時**
+   - `BSC取引データ/` ディレクトリにBscScanからDLしたCSV 4種を配置
+   - `npm run export` 実行で自動取り込み
+
+4. **UIで操作したい場合**（任意ウォレット、視覚的確認）
    ```bash
    npm run dev
    ```
-   アクセス: http://localhost:3000
+   別ターミナルで起動 → http://localhost:3000
 
-3. **Excel出力テスト**
-   - ウォレットアドレス: `0x01b27ec780c534ba0fab15509354c3798321273c`
-   - 対象年: 2025 または 2026
-   - 出力ファイル名: `確定申告{year}ETH.xlsx`
-
-4. **キャッシュクリア**（変更が反映されない場合）
+5. **キャッシュクリア**（変更が反映されない場合）
    ```bash
    rm -rf .next
-   npm run dev
    ```
 
 ## 技術的な学び
@@ -1012,10 +1116,12 @@ NEXT_PUBLIC_ETHERSCAN_API_KEY=your-api-key-here
 - [x] Polygon対応（2026-05-15 main統合完了・origin push済み）
 - [x] FNCT手数料グループ化（同一トークン短時間ペア検出として汎用実装、2026-05-15）
 - [x] 10YETH NFTのボーナス判定改善（無料mint対応、2026-05-15）
-- [ ] 他のブロックチェーン対応（BSC、Arbitrum等）
+- [x] BSC対応（手動Excelインポート、2026-05-16 前半）
+- [x] BSC対応（BscScan CSV自動取り込み + CLIスクリプト化、2026-05-16 第3セッション）
+- [ ] Arbitrum等の他チェーン対応（既存パイプラインに `SUPPORTED_CHAIN_IDS` 追加で容易）
 - [ ] 複数年度のバッチ処理
 - [ ] 取引履歴のローカル保存・再利用（APIリクエスト削減）
-- [ ] FNCT手数料グループ化（受取+approve+送付 → 手数料2行に統合）
+- [ ] BSC側 Aave Supply/LP NFT の専用分類ルール追加（現状は要確認フラグ運用）
 - [ ] UI/UXの改善（進捗表示、エラーハンドリング）
 
 ## 参考資料
@@ -1039,8 +1145,8 @@ NEXT_PUBLIC_ETHERSCAN_API_KEY=your-api-key-here
 
 ---
 
-**最終更新**: 2026-05-15
-**ステータス**: Polygon対応・分類改善すべて main 統合済み（origin/main push 済み）、v10出力で動作確認済み
+**最終更新**: 2026-05-16
+**ステータス**: BSC BscScan CSV自動取り込み + CLI スクリプト化完了。ETH+POL+BSC 3チェーン統合の確定申告Excel生成を `npm run export` 1コマンドで実現。v13 出力で動作確認済み（144行）
 
 ## テスト用ウォレットアドレス
 
