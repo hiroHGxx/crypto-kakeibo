@@ -1013,6 +1013,39 @@ export function convertAllTransactions(
     processedHashes.add(normalizeHash(hash));
   };
 
+  // 自分が発信者（gas代負担）のTXハッシュセット
+  const ownInitiatedTxHashes = new Set<string>();
+  transactions.forEach((tx) => {
+    if (isOwnAddress(tx.from, ownAddressSet)) {
+      ownInitiatedTxHashes.add(tx.hash);
+    }
+  });
+
+  // 自分がそのTXで支払い（ETH送付 or ERC20送付）を行ったハッシュセット
+  const ownPaymentTxHashes = new Set<string>();
+  transactions.forEach((tx) => {
+    if (isOwnAddress(tx.from, ownAddressSet) && weiToEth(tx.value) > 0) {
+      ownPaymentTxHashes.add(tx.hash);
+    }
+  });
+  tokenTransfers.forEach((transfer) => {
+    const value = parseFloat(transfer.value || "0");
+    if (value <= 0) return;
+    if (isOwnAddress(transfer.from, ownAddressSet)) {
+      ownPaymentTxHashes.add(transfer.hash);
+    }
+  });
+
+  // NFT受取をボーナスに分類する判定:
+  // - 他人発信 → ボーナス（エアドロップ/Giveaway）
+  // - 自分発信だが同TXで支払い（ETH/ERC20送出）なし → ボーナス（無料mint）
+  // - 自分発信＋支払いあり → 「受取」のまま（売買検出漏れの可能性、要確認）
+  const isNftBonusReceipt = (hash: string): boolean => {
+    const ownInitiated = ownInitiatedTxHashes.has(hash);
+    const ownPayment = ownPaymentTxHashes.has(hash);
+    return !(ownInitiated && ownPayment);
+  };
+
   // NFT売買取引を先に処理
   nftTrades.forEach((trades, hash) => {
     let hasEntryInYear = false;
@@ -1022,6 +1055,15 @@ export function convertAllTransactions(
       if (isInYear(timestamp)) {
         const entry = convertNFTTradeToEntry(trade, userAddresses, config);
         if (entry) {
+          // groupNFTTrades 経由でも「受取」となった NFT は無料mint判定を適用
+          const symPlus = (entry["取引通貨名(+)"] || "").toString();
+          if (
+            entry.取引種別 === "受取" &&
+            symPlus.startsWith("NFT資産") &&
+            isNftBonusReceipt(trade.nft.hash)
+          ) {
+            entry.取引種別 = "ボーナス";
+          }
           entries.push(entry);
           hasEntryInYear = true;
         }
@@ -1044,30 +1086,6 @@ export function convertAllTransactions(
     const list = internalByHash.get(tx.hash) || [];
     list.push(tx);
     internalByHash.set(tx.hash, list);
-  });
-
-  // 自分が発信者（gas代負担）のTXハッシュセット（ボーナス判定用）
-  const ownInitiatedTxHashes = new Set<string>();
-  transactions.forEach((tx) => {
-    if (isOwnAddress(tx.from, ownAddressSet)) {
-      ownInitiatedTxHashes.add(tx.hash);
-    }
-  });
-
-  // 自分がそのTXで支払い（ETH送付 or ERC20送付）を行ったハッシュセット
-  // 無料mint判定（自分発信NFT受取で支払いなし → ボーナス）に使用
-  const ownPaymentTxHashes = new Set<string>();
-  transactions.forEach((tx) => {
-    if (isOwnAddress(tx.from, ownAddressSet) && weiToEth(tx.value) > 0) {
-      ownPaymentTxHashes.add(tx.hash);
-    }
-  });
-  tokenTransfers.forEach((transfer) => {
-    const value = parseFloat(transfer.value || "0");
-    if (value <= 0) return;
-    if (isOwnAddress(transfer.from, ownAddressSet)) {
-      ownPaymentTxHashes.add(transfer.hash);
-    }
   });
 
   const nftTransferHashSet = new Set<string>([
@@ -2066,16 +2084,6 @@ export function convertAllTransactions(
       }
     }
   });
-
-  // NFT受取をボーナスに分類する判定:
-  // - 他人発信 → ボーナス（エアドロップ/Giveaway）
-  // - 自分発信だが同TXで支払い（ETH/ERC20送出）なし → ボーナス（無料mint）
-  // - 自分発信＋支払いあり → 「受取」のまま（売買検出漏れの可能性、要確認）
-  const isNftBonusReceipt = (hash: string): boolean => {
-    const ownInitiated = ownInitiatedTxHashes.has(hash);
-    const ownPayment = ownPaymentTxHashes.has(hash);
-    return !(ownInitiated && ownPayment);
-  };
 
   // NFT転送（NFT売買以外）
   nftTransfers.forEach((transfer) => {
