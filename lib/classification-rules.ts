@@ -10,8 +10,7 @@ import {
   EtherscanTokenTransfer,
   EtherscanNFTTransfer,
 } from "@/types";
-
-const NULL_ADDRESS = "0x0000000000000000000000000000000000000000";
+import { type ChainConfig, NULL_ADDRESS } from "./chain-config";
 
 export interface RuleContext {
   tx: EtherscanTransaction;
@@ -20,6 +19,7 @@ export interface RuleContext {
   internalTxs: EtherscanTransaction[];
   ownAddresses: Set<string>;
   txHash: string;
+  chainConfig?: ChainConfig;
 }
 
 export interface ClassificationResult {

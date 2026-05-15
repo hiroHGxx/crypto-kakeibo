@@ -8,9 +8,11 @@ const ETHERSCAN_API_BASE = "https://api.etherscan.io/v2/api";
 
 export class EtherscanAPI {
   private apiKey: string;
+  private chainId: string;
 
-  constructor(apiKey: string) {
+  constructor(apiKey: string, chainId: string = "1") {
     this.apiKey = apiKey;
+    this.chainId = chainId;
   }
 
   private uniqueBy<T>(items: T[], keyFn: (item: T) => string): T[] {
@@ -26,29 +28,53 @@ export class EtherscanAPI {
     return result;
   }
 
-  private async fetchAPI(params: Record<string, string>) {
+  private async fetchAPI(params: Record<string, string>, maxRetries = 3) {
     const url = new URL(ETHERSCAN_API_BASE);
-    url.searchParams.append("chainid", "1"); // Ethereum Mainnet
+    url.searchParams.append("chainid", this.chainId);
     url.searchParams.append("apikey", this.apiKey);
     Object.entries(params).forEach(([key, value]) => {
       url.searchParams.append(key, value);
     });
 
-    console.log("Fetching:", url.toString());
-    const response = await fetch(url.toString());
-    const data = await response.json();
-    console.log("Response:", JSON.stringify(data, null, 2));
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      console.log(`Fetching (attempt ${attempt}/${maxRetries}):`, url.toString());
+      const response = await fetch(url.toString());
+      const data = await response.json();
 
-    if (data.status !== "1") {
+      if (data.status === "1") {
+        return data.result;
+      }
+
+      // "No transactions found" は空配列を返す（Polygonで取引がない場合等）
+      if (
+        data.message === "No transactions found" ||
+        data.message === "No records found" ||
+        (data.result && typeof data.result === "string" && data.result.includes("No transactions found"))
+      ) {
+        return [];
+      }
+
+      // タイムアウト系エラーはリトライ
+      const isRetryable =
+        (data.message && data.message.includes("Timeout")) ||
+        (data.result && typeof data.result === "string" && data.result.includes("Timeout"));
+
+      if (isRetryable && attempt < maxRetries) {
+        const waitMs = attempt * 2000; // 2秒, 4秒
+        console.warn(`⚠️ Etherscan timeout, ${waitMs}ms後にリトライ (${attempt}/${maxRetries})`);
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        continue;
+      }
+
       throw new Error(data.message || data.result || "Etherscan API error");
     }
 
-    return data.result;
+    throw new Error("Etherscan API: max retries exceeded");
   }
 
   private async fetchProxy(params: Record<string, string>) {
     const url = new URL(ETHERSCAN_API_BASE);
-    url.searchParams.append("chainid", "1"); // Ethereum Mainnet
+    url.searchParams.append("chainid", this.chainId);
     url.searchParams.append("apikey", this.apiKey);
     Object.entries(params).forEach(([key, value]) => {
       url.searchParams.append(key, value);

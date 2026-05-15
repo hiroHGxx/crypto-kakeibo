@@ -2,22 +2,102 @@
 
 ## プロジェクト概要
 
-仮想通貨（Ethereum）の取引履歴を取得し、確定申告用のExcelファイルを自動生成するWebアプリケーション。
+仮想通貨（Ethereum + Polygon）の取引履歴を取得し、確定申告用のExcelファイルを自動生成するWebアプリケーション。
 
 ### 技術スタック
 - **フレームワーク**: Next.js 15 + React 19 + TypeScript
 - **スタイリング**: Tailwind CSS 4.1
 - **主要ライブラリ**: ExcelJS, date-fns
-- **API**: Etherscan API（無料プラン）
+- **API**: Etherscan v2 API（無料プラン、`chainid`パラメータでマルチチェーン対応）
 
 ### 主な機能
-1. Ethereumウォレットアドレスから取引履歴を取得
-2. 取引種別の自動判定（送金/受取/売買/手数料）
-3. NFT売買の自動検出・グループ化
-4. スパムトークンの自動フィルタリング
-5. 確定申告用Excel形式での出力
+1. Ethereum + Polygonウォレットアドレスから取引履歴を取得
+2. 取引種別の自動判定（送金/受取/売買/手数料/ボーナス）
+3. NFT売買の自動検出・グループ化（マーケットプレイス売却含む）
+4. DEXスワップ検出（Bridge+DEXパターン含む）
+5. スパムトークンの自動フィルタリング
+6. エアドロップ/報酬の自動「ボーナス」分類
+7. 確定申告用Excel形式での出力（全チェーン統合・タイムスタンプソート）
 
-## 最新作業記録（2026-02-24）
+### 現在のブランチ
+- `feature/polygon-support` — Polygon対応の開発ブランチ（mainへ未マージ）
+
+## 最新作業記録（2026-05-14）Polygon対応・DEXスワップ・ボーナス自動分類
+
+### 作業概要
+約3ヶ月ぶりに再開。`feature/polygon-support`ブランチでPolygon対応を実装中。
+
+### 完了した作業
+
+#### 1. Polygon DEXスワップ検出（3件）
+- **SAND→WETH**: Bridge+DEX経由。ERC20 Transfer topicの修正（`chain-config.ts`の誤ったハッシュ値を修正）で解決
+- **POL→WETH**: Bridge+DEX経由。同上
+- **POL→USDC**: DEXスワップ。receipt内のERC20 Transfer検出で対応
+
+#### 2. マーケットプレイスNFT売却検出
+- **SnpitCameraNFT → 153.9 POL**: 買い手がTX発信、売り手はInternal TXでPOL受取
+- `groupNFTTrades`内に`internalReceivedByHash`による検出ロジック追加
+- `convertNFTTradeToEntry`に`paymentValueOverride`サポート追加
+
+#### 3. ボーナス自動分類
+- トークン/NFT受取で、自分がTXを発信していない場合 → 自動的に「ボーナス」に分類
+- `ownInitiatedTxHashes`セットで判定
+- ネイティブトークン（ETH/POL）の受取は対象外
+
+#### 4. value=0トークン転送のフィルタリング
+- USDC 0送付のような無意味な行を除去
+
+#### 5. ERC20 Transfer Topic修正（重大バグ修正）
+- `chain-config.ts`の`ERC20_TRANSFER_TOPIC`が誤ったハッシュだった
+- 正: `0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef`
+- これがreceipt内トークン検出全般の失敗原因だった
+
+#### 6. Wafuku NFT分類の確認
+- v7で「送付」→「売買」に変わったが、手作業版でも「売買 ETH 0.039」と記録されているため**正しい改善**
+- Internal TXでETH受取を検出してマーケットプレイス売却と判定
+
+### 現在の出力結果（v8）
+
+#### 比較ファイル
+- 自動生成: `自動生成_ETHPOL/確定申告2025仮想通貨_8.xlsx`
+- POL手作業版: `参考/確定申告2025POL.xlsx`（28行）
+- ETH参考: `自動生成_ETH/確定申告2025ETH_20.xlsx`（37行）
+- ETH手作業版: `参考/確定申告2025ETH.xlsx`（21行）
+
+#### v8結果
+```
+ETH: 37行 { 売買: 19, 手数料: 6, ボーナス: 4, 受取: 3, 送付: 5 }
+POL: 31行 { 手数料: 3, 売買: 4, ボーナス: 21, 受取: 1, 送付: 2 }
+合計: 68行
+```
+
+#### POL手作業版（28行）との残る差分（3行分）
+1. **行37: FNCT 625受取が「受取」のまま** — 自分がTXを発信してFNCT受取しているため。手作業版では「手数料」扱い（手動判断の違い）
+2. **行62: JPYC 3000 ボーナス** — 手作業版になし（手作業版の記載漏れの可能性）
+3. **行52: USDC 5.058 送付** — 手作業版になし（スワップ後の送付。手作業版では省略）
+
+### 次回作業時の残タスク（優先度順）
+
+#### 高優先度
+- [ ] `feature/polygon-support`ブランチをmainにマージするかの判断
+- [ ] デバッグスクリプト群の整理（`debug-*.js`, `verify-*.js`, `compare-*.js`）
+
+#### 中優先度
+- [ ] FNCT手数料の3行→2行統合（手作業版のように受取+approve+送付を「手数料」グループ化）
+- [ ] 10YETH NFTのボーナス判定改善（無料mint = 自分TX発信だがボーナス扱いが正しい可能性）
+
+#### 低優先度
+- [ ] JPYC/USDC余分行の除外判断（手作業版との差分。実害なし）
+- [ ] ETH側「受取」3件のボーナス判定改善（ETH受取2件は判断保留が適切）
+
+### 主要変更ファイル（今回のセッション）
+- `lib/chain-config.ts`: ERC20_TRANSFER_TOPIC修正、マルチチェーン設定
+- `lib/transaction-converter.ts`: DEXスワップ検出、Bridge+DEX、マーケットプレイスNFT売却、ボーナス自動分類、value=0フィルタ
+- `app/api/export/route.ts`: receipt候補収集ロジック（トークン送出TXも対象化）
+
+---
+
+## 過去の作業記録（2026-02-24）
 
 ### 解決した技術課題3: NFT Burn取引の自動検出（ルールモジュールシステム）
 
@@ -626,25 +706,31 @@ UTC時刻: 2025-01-01 07:28:23
 ```
 Crypto-kakeibo/
 ├── app/
-│   ├── page.tsx                    # メインUI
+│   ├── page.tsx                    # メインUI（デフォルト年: 2026）
 │   ├── api/
-│   │   ├── transactions/route.ts   # Etherscan APIからデータ取得
-│   │   ├── export/route.ts         # Excel生成・ダウンロード
+│   │   ├── transactions/route.ts   # Etherscan APIからデータ取得（プレビュー用）
+│   │   ├── export/route.ts         # Excel生成・ダウンロード（全チェーン統合）
 │   │   └── debug-tokens/route.ts   # デバッグ用
 │   ├── layout.tsx
 │   └── globals.css
 ├── lib/
-│   ├── etherscan.ts                # Etherscan APIクライアント
-│   ├── transaction-converter.ts    # 取引データ→会計エントリ変換
+│   ├── chain-config.ts             # マルチチェーン設定（ETH/POL）、イベントトピック定数
+│   ├── etherscan.ts                # Etherscan v2 APIクライアント（chainid対応）
+│   ├── transaction-converter.ts    # 取引データ→会計エントリ変換（~2000行、中核ロジック）
+│   ├── classification-rules.ts     # 取引分類ルールモジュール（拡張可能設計）
 │   └── excel-generator.ts          # Excel生成ロジック
 ├── types/
 │   └── index.ts                    # TypeScript型定義
 ├── 参考/
-│   └── 確定申告2025ETH.xlsx        # 手作業版（UTC時刻）
-├── 参考_自動生成/
-│   ├── 確定申告2025ETH_2.xlsx      # 旧版（修正前）
-│   └── 確定申告2025ETH_3.xlsx      # 最新版（修正後）
-├── 確定申告2026ETH.xlsx            # 2026年用テストファイル
+│   ├── 確定申告2025ETH.xlsx        # ETH手作業版（21行、UTC時刻）
+│   └── 確定申告2025POL.xlsx        # POL手作業版（28行）
+├── 自動生成_ETH/
+│   └── 確定申告2025ETH_20.xlsx     # ETH自動生成最終版（37行）
+├── 自動生成_ETHPOL/
+│   ├── 確定申告2025仮想通貨_7.xlsx # v7（DEX+NFT売却対応版）
+│   └── 確定申告2025仮想通貨_8.xlsx # v8（ボーナス自動分類版）★最新
+├── 参考ドキュメント/
+│   └── キタドロ.md                 # Gtax共通フォーマット・確定申告ノウハウ
 ├── package.json
 ├── tsconfig.json
 ├── tailwind.config.ts
@@ -716,10 +802,11 @@ NEXT_PUBLIC_ETHERSCAN_API_KEY=your-api-key-here
 
 ## 今後の改善案
 
-- [ ] 他のブロックチェーン対応（BSC、Polygon等）
+- [x] Polygon対応（feature/polygon-supportブランチで実装済み・mainマージ待ち）
+- [ ] 他のブロックチェーン対応（BSC、Arbitrum等）
 - [ ] 複数年度のバッチ処理
-- [ ] 取引履歴のローカル保存・再利用
-- [ ] より詳細な取引種別の自動判定
+- [ ] 取引履歴のローカル保存・再利用（APIリクエスト削減）
+- [ ] FNCT手数料グループ化（受取+approve+送付 → 手数料2行に統合）
 - [ ] UI/UXの改善（進捗表示、エラーハンドリング）
 
 ## 参考資料
@@ -732,22 +819,21 @@ NEXT_PUBLIC_ETHERSCAN_API_KEY=your-api-key-here
 ## 重要な技術的決定事項
 
 1. **タイムスタンプはJST表示**（UTC + 9時間）
-2. **WETH取引はDeposit/Withdrawal eventで検出**
+2. **WETH/WMATIC取引はDeposit/Withdrawal eventで検出**
 3. **自己ウォレット間送金は「手数料」処理**（キタドロマニュアル準拠）
 4. **複数ウォレット対応**（`addresses`配列で指定）
-5. **Receipt取得はWETH contract呼び出しも対象**
+5. **Receipt取得はWETH contract呼び出し + トークン送出TXも対象**
+6. **Etherscan v2 API使用**（`chainid`パラメータで全チェーン統一エンドポイント）
+7. **Bridge+DEXパターン**: 最終トークンがユーザーでなくブリッジコントラクトに送られるケースに対応
+8. **ボーナス判定**: 自分がTX発信していないトークン/NFT受取 → 自動「ボーナス」分類
+9. **マーケットプレイスNFT売却**: NFT OUT + Internal TX受取 → 売買として検出
 
 ---
 
-**最終更新**: 2026-02-24
-**ステータス**: NFT Burn検出ルールモジュール実装完了・WETH取引検出・自己間送金処理完了・動作確認済み
+**最終更新**: 2026-05-14
+**ステータス**: Polygon対応実装中（feature/polygon-support）、v8出力まで検証済み
 
-## 主要ファイル構成
+## テスト用ウォレットアドレス
 
-### 新規作成ファイル
-- `lib/classification-rules.ts`: 取引分類ルールモジュール（拡張可能設計）
-
-### 主要変更ファイル
-- `lib/transaction-converter.ts`: ルール評価統合、NFT Burn検出、デバッグログ追加
-- `lib/excel-generator.ts`: 取引詳細列追加
-- `app/page.tsx`: デフォルト年を2026に変更
+- メイン: `0x01b27ec780c534ba0fab15509354c3798321273c`
+- サブ: `0x581087E117A68537b624e0352833dB96654c0481`

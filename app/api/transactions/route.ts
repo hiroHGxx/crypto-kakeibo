@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { EtherscanAPI } from "@/lib/etherscan";
+import { SUPPORTED_CHAIN_IDS, CHAIN_CONFIGS } from "@/lib/chain-config";
 
 export async function POST(request: NextRequest) {
   try {
@@ -28,12 +29,24 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    console.log("Fetching data from Etherscan...");
-    const etherscan = new EtherscanAPI(apiKey);
-    const data = await etherscan.getAllTransactionsForAddresses(targetAddresses, year);
-    console.log("Data fetched successfully");
+    const chains: Record<string, any> = {};
 
-    return NextResponse.json({ ...data, targetAddresses });
+    for (const chainId of SUPPORTED_CHAIN_IDS) {
+      const config = CHAIN_CONFIGS[chainId];
+      console.log(`Fetching data from Etherscan for ${config.name}...`);
+
+      const etherscan = new EtherscanAPI(apiKey, chainId);
+      const data = await etherscan.getAllTransactionsForAddresses(targetAddresses, year);
+
+      chains[config.name] = {
+        chainId,
+        ...data,
+      };
+
+      console.log(`${config.name} data fetched successfully`);
+    }
+
+    return NextResponse.json({ chains, targetAddresses });
   } catch (error) {
     console.error("API Error:", error);
     const errorMessage = error instanceof Error ? error.message : "データ取得に失敗しました";
