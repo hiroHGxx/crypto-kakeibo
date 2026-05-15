@@ -19,34 +19,35 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const apiKey = process.env.NEXT_PUBLIC_ETHERSCAN_API_KEY;
-    console.log("API Key exists:", !!apiKey);
-
-    if (!apiKey) {
-      return NextResponse.json(
-        { error: "Etherscan APIキーが設定されていません" },
-        { status: 500 }
-      );
-    }
-
     const chains: Record<string, any> = {};
+    const skipped: { name: string; reason: string }[] = [];
 
     for (const chainId of SUPPORTED_CHAIN_IDS) {
       const config = CHAIN_CONFIGS[chainId];
+      const apiKey = process.env[config.apiKeyEnv];
+      if (!apiKey) {
+        console.warn(`⚠️ ${config.name}: ${config.apiKeyEnv} 未設定のためスキップ`);
+        skipped.push({ name: config.name, reason: `${config.apiKeyEnv} 未設定` });
+        continue;
+      }
       console.log(`Fetching data from Etherscan for ${config.name}...`);
 
-      const etherscan = new EtherscanAPI(apiKey, chainId);
-      const data = await etherscan.getAllTransactionsForAddresses(targetAddresses, year);
-
-      chains[config.name] = {
-        chainId,
-        ...data,
-      };
-
-      console.log(`${config.name} data fetched successfully`);
+      try {
+        const etherscan = new EtherscanAPI(apiKey, config);
+        const data = await etherscan.getAllTransactionsForAddresses(targetAddresses, year);
+        chains[config.name] = {
+          chainId,
+          ...data,
+        };
+        console.log(`${config.name} data fetched successfully`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`⚠️ ${config.name} データ取得失敗（このチェーンをスキップ）: ${msg}`);
+        skipped.push({ name: config.name, reason: msg });
+      }
     }
 
-    return NextResponse.json({ chains, targetAddresses });
+    return NextResponse.json({ chains, targetAddresses, skipped });
   } catch (error) {
     console.error("API Error:", error);
     const errorMessage = error instanceof Error ? error.message : "データ取得に失敗しました";

@@ -10,6 +10,7 @@ export default function Home() {
   const [exporting, setExporting] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string>("");
+  const [importFile, setImportFile] = useState<File | null>(null);
 
   const handleFetch = async () => {
     setLoading(true);
@@ -46,19 +47,39 @@ export default function Home() {
     setError("");
 
     try {
-      const response = await fetch("/api/export", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          addresses: [address, secondaryAddress].filter((value) => value.trim().length > 0),
-          year: parseInt(year),
-        }),
-      });
+      const targetAddresses = [address, secondaryAddress].filter(
+        (value) => value.trim().length > 0
+      );
+      let response: Response;
+
+      if (importFile) {
+        // multipart/form-data でファイル付き送信
+        const formData = new FormData();
+        formData.append("addresses", JSON.stringify(targetAddresses));
+        formData.append("year", year);
+        formData.append("importExcel", importFile);
+        response = await fetch("/api/export", {
+          method: "POST",
+          body: formData,
+        });
+      } else {
+        response = await fetch("/api/export", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            addresses: targetAddresses,
+            year: parseInt(year),
+          }),
+        });
+      }
 
       if (!response.ok) {
-        throw new Error("Excel出力に失敗しました");
+        let msg = "Excel出力に失敗しました";
+        try {
+          const errJson = await response.json();
+          if (errJson?.error) msg = errJson.error;
+        } catch {}
+        throw new Error(msg);
       }
 
       const blob = await response.blob();
@@ -118,7 +139,7 @@ export default function Home() {
     <div className="min-h-screen bg-gray-50 py-12 px-4">
       <div className="max-w-4xl mx-auto">
         <h1 className="text-4xl font-bold text-gray-900 mb-8 text-center">
-          仮想通貨取引履歴取得（ETH + Polygon）
+          仮想通貨取引履歴取得（ETH + Polygon + BSC手動）
         </h1>
 
         <div className="bg-white rounded-lg shadow p-6 mb-6">
@@ -160,6 +181,26 @@ export default function Home() {
                 className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 placeholder="2026"
               />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                BNB等 手動入力Excel（任意）
+              </label>
+              <input
+                type="file"
+                accept=".xlsx,.xls"
+                onChange={(e) => setImportFile(e.target.files?.[0] || null)}
+                className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent file:mr-3 file:py-1 file:px-3 file:border-0 file:rounded file:bg-gray-100 file:text-gray-700 file:hover:bg-gray-200"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Etherscan APIで取得できないチェーン（BSC等）は、既存形式のExcelをアップロードすると統合できます。
+                {importFile && (
+                  <span className="ml-2 text-blue-600">
+                    選択中: {importFile.name}
+                  </span>
+                )}
+              </p>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
